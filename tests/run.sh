@@ -24,9 +24,11 @@ test_crlf_config_parsing() {
   tmpfile=$(mktemp)
   printf 'TEST_CRLF_VAL=/some/path\r\nTEST_CRLF_NUM=42\r\n' > "$tmpfile"
 
-  local result
-  result=$(bash -c "source <(sed 's/\r//g' '$tmpfile'); printf '%s:%s' \"\$TEST_CRLF_VAL\" \"\$TEST_CRLF_NUM\"")
-  rm -f "$tmpfile"
+  local tmpclean result
+  tmpclean=$(mktemp)
+  sed 's/\r//g' "$tmpfile" > "$tmpclean"
+  result=$(bash -c "source '$tmpclean'; printf '%s:%s' \"\$TEST_CRLF_VAL\" \"\$TEST_CRLF_NUM\"")
+  rm -f "$tmpfile" "$tmpclean"
   check "CRLF: values stripped of carriage returns" [ "$result" = "/some/path:42" ]
 }
 
