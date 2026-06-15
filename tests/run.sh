@@ -8,13 +8,17 @@ FAIL=0
 
 check() {
   local desc="$1"; shift
-  if "$@" >/dev/null 2>&1; then
+  local tmp
+  tmp=$(mktemp)
+  if "$@" >"$tmp" 2>&1; then
     PASS=$(( PASS + 1 ))
     echo "  PASS: $desc"
   else
     FAIL=$(( FAIL + 1 ))
     echo "  FAIL: $desc"
+    [ -s "$tmp" ] && sed 's/^/    /' "$tmp"
   fi
+  rm -f "$tmp"
 }
 
 # ---------------------------------------------------------------------------
@@ -22,13 +26,15 @@ test_crlf_config_parsing() {
   echo "--- CRLF config parsing ---"
   local tmpfile
   tmpfile=$(mktemp)
+  local tmpclean
+  tmpclean=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmpfile' '$tmpclean'" RETURN
   printf 'TEST_CRLF_VAL=/some/path\r\nTEST_CRLF_NUM=42\r\n' > "$tmpfile"
 
-  local tmpclean result
-  tmpclean=$(mktemp)
+  local result
   sed 's/\r//g' "$tmpfile" > "$tmpclean"
   result=$(bash -c "source '$tmpclean'; printf '%s:%s' \"\$TEST_CRLF_VAL\" \"\$TEST_CRLF_NUM\"")
-  rm -f "$tmpfile" "$tmpclean"
   check "CRLF: values stripped of carriage returns" [ "$result" = "/some/path:42" ]
 }
 
@@ -60,6 +66,9 @@ test_shellcheck() {
       "$REPO_ROOT/install.sh" \
       "$REPO_ROOT/pi/bin/"*.sh \
       "$REPO_ROOT/mac/picam-config.sh"; do
+    case "$script" in
+      *'/*.sh') FAIL=$(( FAIL + 1 )); echo "  FAIL: no scripts found in pi/bin/"; continue ;;
+    esac
     if [ -f "$script" ]; then
       check "shellcheck $(basename "$script")" shellcheck "$script"
     else
