@@ -37,7 +37,7 @@ test_defaults_completeness() {
   echo "--- defaults.conf completeness ---"
   local f="$REPO_ROOT/pi/etc/defaults.conf"
   check "defaults.conf exists" test -f "$f"
-  [ -f "$f" ] || return
+  [ -f "$f" ] || return 0
 
   for key in JPEG_DIR RETENTION_DAYS MODE INTERVAL_MIN WINDOW_START WINDOW_END \
               TIMES CAMERA_MAC CAMERA_USER CAMERA_PASS SNAPSHOT_URL \
