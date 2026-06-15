@@ -147,7 +147,7 @@ FAKESCRIPT
   check "wifi: valid → exits 0"              run_wifi
   check "wifi: valid → .txt removed"         test ! -f "$boot_dir/wifi-update.txt"
   check "wifi: valid → .applied created"     test -f  "$boot_dir/wifi-update.applied"
-  check "wifi: valid → PASS scrubbed"        bash -c "! grep -q '^PASS=' '$boot_dir/wifi-update.applied'"
+  check "wifi: valid → PASS scrubbed"        bash -c "test -f '$boot_dir/wifi-update.applied' && ! grep -q '^PASS=' '$boot_dir/wifi-update.applied'"
   check "wifi: valid → SSID preserved"       grep -q 'SSID=TestNetwork' "$boot_dir/wifi-update.applied"
   check "wifi: valid → nmcli add called"     grep -q 'connection add'   "$calls_file"
   check "wifi: valid → nmcli up called"      grep -q 'connection up'    "$calls_file"
@@ -169,6 +169,7 @@ FAKESCRIPT
   check "wifi: short PASS → exits non-zero" \
     bash -c "! PICAM_BOOT_DIR='$boot_dir' STATUS_LOG='$status_log' PICAM_NMCLI='$fake_nmcli' PICAM_DEFAULTS=/dev/null bash '$script'"
   check "wifi: short PASS → .failed created" test -f "$boot_dir/wifi-update.failed"
+  check "wifi: short PASS → ERROR in .failed" grep -q 'ERROR' "$boot_dir/wifi-update.failed"
   rm -f "$boot_dir/wifi-update.failed"
 
   # --- scenario 5: profile already exists → modify (not add) ---
