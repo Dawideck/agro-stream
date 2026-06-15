@@ -1,0 +1,12 @@
+[Unit]
+Description=PiCam WiFi profile applier
+After=NetworkManager.service
+Before=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wifi-applier.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=network-online.target

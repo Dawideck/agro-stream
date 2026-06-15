@@ -1,0 +1,9 @@
+[Unit]
+Description=PiCam healthcheck
+After=network-online.target
+
+[Service]
+Type=oneshot
+RuntimeDirectory=picam
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/bin/healthcheck.sh
