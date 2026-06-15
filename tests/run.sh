@@ -102,10 +102,102 @@ test_systemd_units() {
 }
 
 # ---------------------------------------------------------------------------
+test_wifi_applier() {
+  echo "--- wifi-applier lifecycle ---"
+
+  local boot_dir status_log calls_file fake_nmcli script
+  boot_dir=$(mktemp -d)
+  status_log=$(mktemp)
+  calls_file=$(mktemp)
+  fake_nmcli=$(mktemp)
+  script="$REPO_ROOT/pi/bin/wifi-applier.sh"
+
+  # shellcheck disable=SC2064
+  trap "rm -rf '$boot_dir' '$status_log' '$calls_file' '$fake_nmcli'" RETURN
+
+  # Fake nmcli: records all invocations; simulates "profile does not exist"
+  cat > "$fake_nmcli" << FAKESCRIPT
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_file"
+case "\$1 \$2" in
+  "connection show") exit 1 ;;
+  *) exit 0 ;;
+esac
+FAKESCRIPT
+  chmod +x "$fake_nmcli"
+
+  run_wifi() {
+    PICAM_BOOT_DIR="$boot_dir" \
+    STATUS_LOG="$status_log" \
+    PICAM_NMCLI="$fake_nmcli" \
+    PICAM_DEFAULTS=/dev/null \
+    bash "$script"
+  }
+
+  # --- scenario 1: no wifi-update.txt → silent exit 0, nothing created ---
+  check "wifi: no file → exits 0" run_wifi
+  check "wifi: no file → no .applied" test ! -f "$boot_dir/wifi-update.applied"
+  check "wifi: no file → no .failed"  test ! -f "$boot_dir/wifi-update.failed"
+
+  # --- scenario 2: valid CRLF file → .applied created, PASS scrubbed ---
+  printf 'SSID=TestNetwork\r\nPASS=SuperSecret123\r\nPRIORITY=10\r\n' \
+    > "$boot_dir/wifi-update.txt"
+  > "$calls_file"
+
+  check "wifi: valid → exits 0"              run_wifi
+  check "wifi: valid → .txt removed"         test ! -f "$boot_dir/wifi-update.txt"
+  check "wifi: valid → .applied created"     test -f  "$boot_dir/wifi-update.applied"
+  check "wifi: valid → PASS scrubbed"        bash -c "! grep -q '^PASS=' '$boot_dir/wifi-update.applied'"
+  check "wifi: valid → SSID preserved"       grep -q 'SSID=TestNetwork' "$boot_dir/wifi-update.applied"
+  check "wifi: valid → nmcli add called"     grep -q 'connection add'   "$calls_file"
+  check "wifi: valid → nmcli up called"      grep -q 'connection up'    "$calls_file"
+
+  # --- scenario 3: empty SSID → .failed with ERROR line ---
+  printf 'SSID=\r\nPASS=SuperSecret123\r\nPRIORITY=5\r\n' \
+    > "$boot_dir/wifi-update.txt"
+
+  check "wifi: empty SSID → exits non-zero" \
+    bash -c "! PICAM_BOOT_DIR='$boot_dir' STATUS_LOG='$status_log' PICAM_NMCLI='$fake_nmcli' PICAM_DEFAULTS=/dev/null bash '$script'"
+  check "wifi: empty SSID → .failed created" test -f "$boot_dir/wifi-update.failed"
+  check "wifi: empty SSID → ERROR in .failed" grep -q 'ERROR' "$boot_dir/wifi-update.failed"
+  rm -f "$boot_dir/wifi-update.failed"
+
+  # --- scenario 4: PASS too short (< 8 chars) → .failed ---
+  printf 'SSID=TestNetwork\r\nPASS=short\r\nPRIORITY=5\r\n' \
+    > "$boot_dir/wifi-update.txt"
+
+  check "wifi: short PASS → exits non-zero" \
+    bash -c "! PICAM_BOOT_DIR='$boot_dir' STATUS_LOG='$status_log' PICAM_NMCLI='$fake_nmcli' PICAM_DEFAULTS=/dev/null bash '$script'"
+  check "wifi: short PASS → .failed created" test -f "$boot_dir/wifi-update.failed"
+  rm -f "$boot_dir/wifi-update.failed"
+
+  # --- scenario 5: profile already exists → modify (not add) ---
+  printf 'SSID=ExistNet\r\nPASS=AnotherSecret456\r\nPRIORITY=5\r\n' \
+    > "$boot_dir/wifi-update.txt"
+  > "$calls_file"
+
+  # Rewrite fake nmcli so it says the profile already exists
+  cat > "$fake_nmcli" << FAKESCRIPT2
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_file"
+case "\$1 \$2" in
+  "connection show") exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKESCRIPT2
+  chmod +x "$fake_nmcli"
+
+  check "wifi: existing profile → exits 0"        run_wifi
+  check "wifi: existing profile → modify called"  grep -q 'connection modify' "$calls_file"
+  check "wifi: existing profile → add NOT called" bash -c "! grep -q 'connection add' '$calls_file'"
+}
+
+# ---------------------------------------------------------------------------
 test_crlf_config_parsing
 test_defaults_completeness
 test_shellcheck
 test_systemd_units
+test_wifi_applier
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
