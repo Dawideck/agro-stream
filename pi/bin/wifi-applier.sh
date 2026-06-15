@@ -14,7 +14,7 @@ WIFI_UPDATE="$BOOT_PICAM/wifi-update.txt"
 
 _log() {
   echo "[wifi-applier] $*"
-  echo "$(date -u '+%Y-%m-%d %H:%M:%S') | $*" >> "$STATUS_LOG"
+  echo "$(date -u '+%Y-%m-%d %H:%M:%S') | $*" >> "$STATUS_LOG" 2>/dev/null || true
 }
 
 # Nothing to do when no update file is present
@@ -37,12 +37,14 @@ done < "$WIFI_UPDATE"
 # Write .failed record and exit non-zero
 _fail() {
   local reason="$1"
+  echo "[wifi-applier] WIFI FAIL | reason=$reason"
   {
     printf 'ERROR: %s\n' "$reason"
     grep -v '^PASS=' "$WIFI_UPDATE" || true
-  } > "$BOOT_PICAM/wifi-update.failed"
-  rm -f "$WIFI_UPDATE"
-  _log "WIFI FAIL | reason=$reason"
+  } > "$BOOT_PICAM/wifi-update.failed" 2>/dev/null || true
+  rm -f "$WIFI_UPDATE" 2>/dev/null || true
+  echo "$(date -u '+%Y-%m-%d %H:%M:%S') | WIFI FAIL | reason=$reason" \
+    >> "$STATUS_LOG" 2>/dev/null || true
   exit 1
 }
 
