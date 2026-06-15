@@ -1,0 +1,7 @@
+# camera.conf — written by onvif-probe.sh; set credentials here before install
+# Snapshot URL uses {IP} placeholder — discover-camera.sh substitutes the live IP.
+CAMERA_MAC=00:46:b8:28:e2:55
+CAMERA_USER=admin
+CAMERA_PASS=
+ONVIF_MEDIA_XADDR=http://{IP}/onvif/Media
+SNAPSHOT_URL=http://{IP}:80/onvif/Snapshot

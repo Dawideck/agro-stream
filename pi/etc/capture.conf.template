@@ -1,0 +1,10 @@
+# capture.conf — shooting schedule (on boot partition; editable from Mac)
+# MODE=interval  shoot every INTERVAL_MIN between WINDOW_START and WINDOW_END (UTC)
+# MODE=times     shoot at each HH:MM listed in TIMES (UTC, comma-separated)
+MODE=interval
+INTERVAL_MIN=30
+WINDOW_START=07:00
+WINDOW_END=18:00
+TIMES=08:00,12:00,16:00
+JPEG_DIR=/var/lib/picam/photos
+RETENTION_DAYS=30
