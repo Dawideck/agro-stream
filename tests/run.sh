@@ -194,11 +194,131 @@ FAKESCRIPT2
 }
 
 # ---------------------------------------------------------------------------
+test_discover_camera() {
+  echo "--- discover-camera ---"
+
+  local var_dir status_log fake_arpscan fake_ip fake_tcp script
+  var_dir=$(mktemp -d)
+  status_log=$(mktemp)
+  fake_arpscan=$(mktemp)
+  fake_ip=$(mktemp)
+  fake_tcp=$(mktemp)
+  script="$REPO_ROOT/pi/bin/discover-camera.sh"
+
+  # shellcheck disable=SC2064
+  trap "rm -rf '$var_dir' '$status_log' '$fake_arpscan' '$fake_ip' '$fake_tcp'" RETURN
+
+  # Default fake ip: network is UP
+  printf '#!/usr/bin/env bash\necho "default via 192.168.1.1 dev wlan0"\n' > "$fake_ip"
+  chmod +x "$fake_ip"
+
+  # Default fake TCP check: all hosts unreachable
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_tcp"
+  chmod +x "$fake_tcp"
+
+  # Default fake arp-scan: no hosts
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_arpscan"
+  chmod +x "$fake_arpscan"
+
+  run_discover() {
+    CAMERA_IP_CACHE="$var_dir/camera_ip" \
+    STATUS_LOG="$status_log" \
+    CAMERA_MAC="00:46:b8:28:e2:55" \
+    PICAM_ARPSCAN="$fake_arpscan" \
+    PICAM_IP_CMD="$fake_ip" \
+    PICAM_TCP_CHECK="$fake_tcp" \
+    PICAM_DEFAULTS=/dev/null \
+    bash "$script"
+  }
+
+  # --- scenario 1: no network → exit 2 ---
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_ip"
+  chmod +x "$fake_ip"
+
+  check "discover: no network → exit 2" bash -c "
+    rc=0
+    CAMERA_IP_CACHE='$var_dir/camera_ip' \
+    STATUS_LOG='$status_log' \
+    CAMERA_MAC='00:46:b8:28:e2:55' \
+    PICAM_ARPSCAN='$fake_arpscan' \
+    PICAM_IP_CMD='$fake_ip' \
+    PICAM_TCP_CHECK='$fake_tcp' \
+    PICAM_DEFAULTS=/dev/null \
+    bash '$script' >/dev/null 2>&1 || rc=\$?
+    [ \"\$rc\" -eq 2 ]
+  "
+
+  # Restore network
+  printf '#!/usr/bin/env bash\necho "default via 192.168.1.1 dev wlan0"\n' > "$fake_ip"
+  chmod +x "$fake_ip"
+
+  # --- scenario 2: valid cached IP responds on port 80 → exit 0, outputs IP ---
+  echo "192.168.1.113" > "$var_dir/camera_ip"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_tcp"
+  chmod +x "$fake_tcp"
+
+  local result
+  result=$(run_discover) || true
+  check "discover: cache hit → exits 0"       run_discover
+  check "discover: cache hit → outputs IP"    [ "$result" = "192.168.1.113" ]
+
+  # --- scenario 3: stale cache, arp-scan finds camera → exit 0, cache updated ---
+  rm -f "$var_dir/camera_ip"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fake_tcp"
+  chmod +x "$fake_tcp"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.200\t00:46:b8:28:e2:55\tKenik\n"\n' \
+    > "$fake_arpscan"
+  chmod +x "$fake_arpscan"
+
+  result=$(run_discover) || true
+  check "discover: arp finds camera → exits 0"   [ "$result" = "192.168.1.200" ]
+  check "discover: arp finds camera → cache set" [ "$(cat "$var_dir/camera_ip")" = "192.168.1.200" ]
+
+  # --- scenario 4: camera not found → exit 3 ---
+  rm -f "$var_dir/camera_ip"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.1\taa:bb:cc:dd:ee:ff\tRouter\n"\n' \
+    > "$fake_arpscan"
+  chmod +x "$fake_arpscan"
+
+  check "discover: not found → exit 3" bash -c "
+    rc=0
+    CAMERA_IP_CACHE='$var_dir/camera_ip' \
+    STATUS_LOG='$status_log' \
+    CAMERA_MAC='00:46:b8:28:e2:55' \
+    PICAM_ARPSCAN='$fake_arpscan' \
+    PICAM_IP_CMD='$fake_ip' \
+    PICAM_TCP_CHECK='$fake_tcp' \
+    PICAM_DEFAULTS=/dev/null \
+    bash '$script' >/dev/null 2>&1 || rc=\$?
+    [ \"\$rc\" -eq 3 ]
+  "
+
+  # --- scenario 5: MAC normalisation — stripped leading zero + uppercase ---
+  rm -f "$var_dir/camera_ip"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.200\t0:46:B8:28:E2:55\tKenik\n"\n' \
+    > "$fake_arpscan"
+  chmod +x "$fake_arpscan"
+
+  result=$(run_discover) || true
+  check "discover: MAC norm (0:46:B8…) → found" [ "$result" = "192.168.1.200" ]
+
+  # --- scenario 6: MAC normalisation — dashes ---
+  rm -f "$var_dir/camera_ip"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.200\t00-46-b8-28-e2-55\tKenik\n"\n' \
+    > "$fake_arpscan"
+  chmod +x "$fake_arpscan"
+
+  result=$(run_discover) || true
+  check "discover: MAC norm (00-46-…) → found" [ "$result" = "192.168.1.200" ]
+}
+
+# ---------------------------------------------------------------------------
 test_crlf_config_parsing
 test_defaults_completeness
 test_shellcheck
 test_systemd_units
 test_wifi_applier
+test_discover_camera
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
