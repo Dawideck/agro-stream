@@ -313,12 +313,193 @@ test_discover_camera() {
 }
 
 # ---------------------------------------------------------------------------
+test_onvif_probe() {
+  echo "--- onvif-probe ---"
+
+  local tmp_dir fake_curl calls_file script
+  tmp_dir=$(mktemp -d)
+  calls_file="$tmp_dir/curl_calls"
+  fake_curl="$tmp_dir/fake_curl.sh"
+  script="$REPO_ROOT/pi/bin/onvif-probe.sh"
+
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  # Canned SOAP responses ------------------------------------------------
+
+  # GetSystemDateAndTime
+  cat > "$tmp_dir/time.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetSystemDateAndTimeResponse>
+<tds:SystemDateAndTime><tt:UTCDateTime>
+<tt:Time><tt:Hour>12</tt:Hour><tt:Minute>0</tt:Minute><tt:Second>0</tt:Second></tt:Time>
+<tt:Date><tt:Year>2026</tt:Year><tt:Month>6</tt:Month><tt:Day>15</tt:Day></tt:Date>
+</tt:UTCDateTime></tds:SystemDateAndTime>
+</tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # GetCapabilities → media XAddr
+  cat > "$tmp_dir/caps.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetCapabilitiesResponse>
+<tds:Capabilities><tt:Media>
+<tt:XAddr>http://192.168.1.113/onvif/Media</tt:XAddr>
+</tt:Media></tds:Capabilities>
+</tds:GetCapabilitiesResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # GetProfiles: 3 profiles — highest-res (Profile_Main) is LAST, not first
+  cat > "$tmp_dir/profiles.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetProfilesResponse>
+<trt:Profiles token="Profile_Mobile">
+<tt:Width>640</tt:Width><tt:Height>480</tt:Height>
+</trt:Profiles>
+<trt:Profiles token="Profile_Sub">
+<tt:Width>1280</tt:Width><tt:Height>720</tt:Height>
+</trt:Profiles>
+<trt:Profiles token="Profile_Main">
+<tt:Width>2688</tt:Width><tt:Height>1520</tt:Height>
+</trt:Profiles>
+</trt:GetProfilesResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # GetSnapshotUri
+  cat > "$tmp_dir/snapuri.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetSnapshotUriResponse>
+<trt:MediaUri><tt:Uri>http://192.168.1.113:80/onvif/Snapshot</tt:Uri>
+</trt:MediaUri></trt:GetSnapshotUriResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # Fake curl: records calls, dispatches by request body ----------------
+  cat > "$fake_curl" << CURLEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_file"
+
+body="" output_file="" prev=""
+for arg in "\$@"; do
+  case "\$prev" in
+    -d) body="\$arg" ;;
+    -o) output_file="\$arg" ;;
+  esac
+  prev="\$arg"
+done
+
+if [ -n "\$output_file" ]; then
+  printf '\xff\xd8\xff\xe0' > "\$output_file"
+  dd if=/dev/zero bs=1024 count=11 >> "\$output_file" 2>/dev/null
+  exit 0
+fi
+
+if printf '%s' "\$body" | grep -q 'GetSystemDateAndTime'; then
+  cat "$tmp_dir/time.xml"
+elif printf '%s' "\$body" | grep -q 'GetCapabilities'; then
+  cat "$tmp_dir/caps.xml"
+elif printf '%s' "\$body" | grep -q 'GetSnapshotUri'; then
+  cat "$tmp_dir/snapuri.xml"
+elif printf '%s' "\$body" | grep -q 'GetProfiles'; then
+  cat "$tmp_dir/profiles.xml"
+else
+  exit 1
+fi
+CURLEOF
+  chmod +x "$fake_curl"
+
+  run_probe() {
+    PICAM_CURL="$fake_curl" \
+    PICAM_BOOT_DIR="$tmp_dir/boot" \
+    PICAM_DEFAULTS=/dev/null \
+    CAMERA_USER=admin \
+    CAMERA_PASS='' \
+    STATUS_LOG="$tmp_dir/status.log" \
+    bash "$script" 192.168.1.113
+  }
+  mkdir -p "$tmp_dir/boot"
+
+  # --- scenario 1: happy path → camera.conf written with {IP} template ---
+  true > "$calls_file"
+  check "probe: happy path → exits 0" run_probe
+  check "probe: camera.conf created" test -f "$tmp_dir/boot/camera.conf"
+  check "probe: SNAPSHOT_URL uses {IP} template" \
+    grep -q 'SNAPSHOT_URL=http://{IP}' "$tmp_dir/boot/camera.conf"
+  check "probe: ONVIF_MEDIA_XADDR uses {IP} template" \
+    grep -q 'ONVIF_MEDIA_XADDR=http://{IP}' "$tmp_dir/boot/camera.conf"
+  check "probe: CAMERA_USER written" \
+    grep -q 'CAMERA_USER=admin' "$tmp_dir/boot/camera.conf"
+
+  # --- scenario 2: profile selection — highest-res (Profile_Main) used ---
+  check "probe: GetSnapshotUri called with Profile_Main (highest res)" \
+    grep -q 'Profile_Main' "$calls_file"
+
+  # --- scenario 3: GetSystemDateAndTime called (clock-skew handling) ---
+  check "probe: GetSystemDateAndTime called" \
+    grep -q 'GetSystemDateAndTime' "$calls_file"
+
+  # --- scenario 4: GetCapabilities failure → exit 2 + no camera.conf ---
+  cat > "$tmp_dir/caps.xml" << 'XMLEOF'
+<s:Envelope><s:Body><s:Fault><s:Code><s:Value>env:Receiver</s:Value></s:Code></s:Fault></s:Body></s:Envelope>
+XMLEOF
+  rm -f "$tmp_dir/boot/camera.conf"
+
+  check "probe: caps failure → exit 2" bash -c "
+    rc=0
+    PICAM_CURL='$fake_curl' PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_DEFAULTS=/dev/null CAMERA_USER=admin CAMERA_PASS= \
+    STATUS_LOG='$tmp_dir/status.log' \
+    bash '$script' 192.168.1.113 >/dev/null 2>&1 || rc=\$?
+    [ \"\$rc\" -eq 2 ]
+  "
+  check "probe: caps failure → no camera.conf written" \
+    test ! -f "$tmp_dir/boot/camera.conf"
+
+  # Restore caps response
+  cat > "$tmp_dir/caps.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetCapabilitiesResponse>
+<tds:Capabilities><tt:Media>
+<tt:XAddr>http://192.168.1.113/onvif/Media</tt:XAddr>
+</tt:Media></tds:Capabilities>
+</tds:GetCapabilitiesResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # --- scenario 5: invalid JPEG → exit 5 ---
+  cat > "$fake_curl" << CURLEOF2
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_file"
+body="" output_file="" prev=""
+for arg in "\$@"; do
+  case "\$prev" in
+    -d) body="\$arg" ;;
+    -o) output_file="\$arg" ;;
+  esac
+  prev="\$arg"
+done
+if [ -n "\$output_file" ]; then
+  printf 'not a jpeg' > "\$output_file"
+  exit 0
+fi
+if printf '%s' "\$body" | grep -q 'GetSystemDateAndTime'; then cat "$tmp_dir/time.xml"
+elif printf '%s' "\$body" | grep -q 'GetCapabilities'; then cat "$tmp_dir/caps.xml"
+elif printf '%s' "\$body" | grep -q 'GetSnapshotUri'; then cat "$tmp_dir/snapuri.xml"
+elif printf '%s' "\$body" | grep -q 'GetProfiles'; then cat "$tmp_dir/profiles.xml"
+else exit 1; fi
+CURLEOF2
+  chmod +x "$fake_curl"
+
+  check "probe: invalid JPEG → exit 5" bash -c "
+    rc=0
+    PICAM_CURL='$fake_curl' PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_DEFAULTS=/dev/null CAMERA_USER=admin CAMERA_PASS= \
+    STATUS_LOG='$tmp_dir/status.log' \
+    bash '$script' 192.168.1.113 >/dev/null 2>&1 || rc=\$?
+    [ \"\$rc\" -eq 5 ]
+  "
+}
+
+# ---------------------------------------------------------------------------
 test_crlf_config_parsing
 test_defaults_completeness
 test_shellcheck
 test_systemd_units
 test_wifi_applier
 test_discover_camera
+test_onvif_probe
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
