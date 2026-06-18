@@ -76,27 +76,28 @@ get_camera_created() {
 }
 
 # Select the profile token with the highest Width.
-# Scans interleaved token="..." / <tt:Width>N</tt:Width> in document order.
+# Matches only top-level <..Profiles token="..."> elements, not the nested
+# VideoEncoderConfiguration / VideoSourceConfiguration tokens that also carry
+# token= attributes and appear before the <tt:Width> values in document order.
 select_best_profile() {
   local xml="$1" best_token='' best_width=0
   local current_token='' current_width=0 item
 
   while IFS= read -r item; do
     case "$item" in
-      token=*)
+      Profiles\ *)
         if [ "${current_width:-0}" -gt "$best_width" ]; then
           best_width="$current_width"
           best_token="$current_token"
         fi
-        current_token="${item#*=\"}"
-        current_token="${current_token%\"}"
+        current_token=$(printf '%s' "$item" | grep -oE 'token="[^"]*"' | sed 's/token="//;s/"//')
         current_width=0
         ;;
       '<tt:Width>'*)
         current_width="${item#*>}"
         ;;
     esac
-  done < <(printf '%s' "$xml" | grep -oE '(token="[^"]*"|<tt:Width>[0-9]+)' || true)
+  done < <(printf '%s' "$xml" | grep -oE '(Profiles [^<>]*|<tt:Width>[0-9]+)' || true)
 
   # Flush last profile
   if [ "${current_width:-0}" -gt "$best_width" ]; then

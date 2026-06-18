@@ -428,6 +428,40 @@ CURLEOF
   check "probe: GetSnapshotUri called with Profile_Main (highest res)" \
     grep -q 'Profile_Main' "$calls_file"
 
+  # --- scenario 2b: nested encoder tokens (real Kenik camera format) ---
+  # Profiles element wraps a VideoEncoderConfiguration with its own token.
+  # select_best_profile must pick the PROFILE token, not the encoder token.
+  cat > "$tmp_dir/profiles.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetProfilesResponse>
+<trt:Profiles token="MainStream"><tt:VideoEncoderConfiguration token="VideoEncoderToken0s0">
+<tt:Resolution><tt:Width>2688</tt:Width><tt:Height>1520</tt:Height></tt:Resolution>
+</tt:VideoEncoderConfiguration></trt:Profiles>
+<trt:Profiles token="SubStream"><tt:VideoEncoderConfiguration token="VideoEncoderToken1s0">
+<tt:Resolution><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:Resolution>
+</tt:VideoEncoderConfiguration></trt:Profiles>
+</trt:GetProfilesResponse></s:Body></s:Envelope>
+XMLEOF
+  true > "$calls_file"
+  check "probe: nested encoder tokens → exits 0" run_probe
+  check "probe: nested tokens → uses profile token MainStream (not VideoEncoderToken0s0)" \
+    grep -q 'MainStream' "$calls_file"
+  check "probe: nested tokens → encoder token NOT used as ProfileToken" bash -c \
+    "! grep -q 'VideoEncoderToken0s0' '$calls_file'"
+  # Restore original profiles.xml for remaining scenarios
+  cat > "$tmp_dir/profiles.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetProfilesResponse>
+<trt:Profiles token="Profile_Mobile">
+<tt:Width>640</tt:Width><tt:Height>480</tt:Height>
+</trt:Profiles>
+<trt:Profiles token="Profile_Sub">
+<tt:Width>1280</tt:Width><tt:Height>720</tt:Height>
+</trt:Profiles>
+<trt:Profiles token="Profile_Main">
+<tt:Width>2688</tt:Width><tt:Height>1520</tt:Height>
+</trt:Profiles>
+</trt:GetProfilesResponse></s:Body></s:Envelope>
+XMLEOF
+
   # --- scenario 3: GetSystemDateAndTime called (clock-skew handling) ---
   check "probe: GetSystemDateAndTime called" \
     grep -q 'GetSystemDateAndTime' "$calls_file"
