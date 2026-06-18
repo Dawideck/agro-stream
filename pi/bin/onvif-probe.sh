@@ -55,12 +55,17 @@ get_camera_created() {
   resp=$(soap_post "$DEVICE" \
     '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/></s:Body></s:Envelope>' \
     2>/dev/null || true)
-  year=$(printf '%s' "$resp"   | grep -oE '<tt:Year>[0-9]+'   | grep -oE '[0-9]+' || true)
-  month=$(printf '%s' "$resp"  | grep -oE '<tt:Month>[0-9]+'  | grep -oE '[0-9]+' || true)
-  day=$(printf '%s' "$resp"    | grep -oE '<tt:Day>[0-9]+'    | grep -oE '[0-9]+' || true)
-  hour=$(printf '%s' "$resp"   | grep -oE '<tt:Hour>[0-9]+'   | grep -oE '[0-9]+' || true)
-  minute=$(printf '%s' "$resp" | grep -oE '<tt:Minute>[0-9]+' | grep -oE '[0-9]+' || true)
-  second=$(printf '%s' "$resp" | grep -oE '<tt:Second>[0-9]+' | grep -oE '[0-9]+' || true)
+  # Namespace-independent patterns (handles tt:, tds:, or no prefix).
+  # head -1 takes only the first occurrence — guards against cameras that
+  # include both UTCDateTime and LocalDateTime in one response (double match
+  # would give multiline output that breaks printf '%02d').
+  # [[:space:]]* tolerates whitespace between > and the digit value.
+  year=$(printf '%s'   "$resp" | grep -oE '[Yy]ear>[[:space:]]*[0-9]+'   | head -1 | grep -oE '[0-9]+' || true)
+  month=$(printf '%s'  "$resp" | grep -oE '[Mm]onth>[[:space:]]*[0-9]+'  | head -1 | grep -oE '[0-9]+' || true)
+  day=$(printf '%s'    "$resp" | grep -oE '[Dd]ay>[[:space:]]*[0-9]+'    | head -1 | grep -oE '[0-9]+' || true)
+  hour=$(printf '%s'   "$resp" | grep -oE '[Hh]our>[[:space:]]*[0-9]+'   | head -1 | grep -oE '[0-9]+' || true)
+  minute=$(printf '%s' "$resp" | grep -oE '[Mm]inute>[[:space:]]*[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+  second=$(printf '%s' "$resp" | grep -oE '[Ss]econd>[[:space:]]*[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
 
   if [ -n "$year" ] && [ -n "$month" ] && [ -n "$day" ]; then
     printf '%04d-%02d-%02dT%02d:%02d:%02dZ' \

@@ -257,9 +257,8 @@ Checks, in order, writing one summary line to `status.log`:
 ### 6.7 `install.sh` (office, one-time, run on the Pi)
 - Installs packages (`arp-scan`, `curl`), copies scripts to
   `/usr/local/bin`, installs/enables units, creates `/boot/firmware/picam/` with
-  template configs, enables watchdog, sets hostname (`picam.local` via Avahi for
-  office convenience), optional `--with-tailscale` flag (install + print the
-  auth URL, do not block).
+  template configs, enables watchdog, optional `--with-tailscale` flag (install
+  + print the auth URL, do not block).
 - Idempotent: safe to re-run.
 - Does **not** change the hostname — leave it as the operator set it (default `pi`).
   Adds `127.0.1.1 <hostname>` to `/etc/hosts` if missing (suppresses sudo warning).

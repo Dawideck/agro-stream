@@ -142,7 +142,7 @@ FAKESCRIPT
   # --- scenario 2: valid CRLF file → .applied created, PASS scrubbed ---
   printf 'SSID=TestNetwork\r\nPASS=SuperSecret123\r\nPRIORITY=10\r\n' \
     > "$boot_dir/wifi-update.txt"
-  > "$calls_file"
+  true > "$calls_file"
 
   check "wifi: valid → exits 0"              run_wifi
   check "wifi: valid → .txt removed"         test ! -f "$boot_dir/wifi-update.txt"
@@ -175,7 +175,7 @@ FAKESCRIPT
   # --- scenario 5: profile already exists → modify (not add) ---
   printf 'SSID=ExistNet\r\nPASS=AnotherSecret456\r\nPRIORITY=5\r\n' \
     > "$boot_dir/wifi-update.txt"
-  > "$calls_file"
+  true > "$calls_file"
 
   # Rewrite fake nmcli so it says the profile already exists
   cat > "$fake_nmcli" << FAKESCRIPT2
@@ -491,6 +491,119 @@ CURLEOF2
     [ \"\$rc\" -eq 5 ]
   "
 }
+
+# ---------------------------------------------------------------------------
+test_camera_time_parsing() {
+  echo "--- camera time parsing ---"
+
+  local tmp_dir fake_curl script
+  tmp_dir=$(mktemp -d)
+  fake_curl="$tmp_dir/fake_curl.sh"
+  script="$REPO_ROOT/pi/bin/onvif-probe.sh"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+  mkdir -p "$tmp_dir/boot"
+
+  # Shared non-time SOAP responses
+  cat > "$tmp_dir/caps.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media>
+<tt:XAddr>http://192.168.1.1/onvif/Media</tt:XAddr>
+</tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse></s:Body></s:Envelope>
+XMLEOF
+  cat > "$tmp_dir/profiles.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetProfilesResponse>
+<trt:Profiles token="Profile_1"><tt:Width>1280</tt:Width></trt:Profiles>
+</trt:GetProfilesResponse></s:Body></s:Envelope>
+XMLEOF
+  cat > "$tmp_dir/snapuri.xml" << 'XMLEOF'
+<s:Envelope><s:Body><trt:GetSnapshotUriResponse>
+<trt:MediaUri><tt:Uri>http://192.168.1.1:80/onvif/Snapshot</tt:Uri>
+</trt:MediaUri></trt:GetSnapshotUriResponse></s:Body></s:Envelope>
+XMLEOF
+
+  # Fake curl: reads time response from $tmp_dir/time.xml; writes fake JPEG for snapshot
+  cat > "$fake_curl" << CURLEOF
+#!/usr/bin/env bash
+body="" output_file="" prev=""
+for arg in "\$@"; do
+  case "\$prev" in
+    -d) body="\$arg" ;;
+    -o) output_file="\$arg" ;;
+  esac
+  prev="\$arg"
+done
+if [ -n "\$output_file" ]; then
+  printf '\xff\xd8\xff\xe0' > "\$output_file"
+  dd if=/dev/zero bs=1024 count=11 >> "\$output_file" 2>/dev/null
+  exit 0
+fi
+if printf '%s' "\$body" | grep -q 'GetSystemDateAndTime'; then cat "$tmp_dir/time.xml"
+elif printf '%s' "\$body" | grep -q 'GetCapabilities'; then cat "$tmp_dir/caps.xml"
+elif printf '%s' "\$body" | grep -q 'GetSnapshotUri'; then cat "$tmp_dir/snapuri.xml"
+elif printf '%s' "\$body" | grep -q 'GetProfiles'; then cat "$tmp_dir/profiles.xml"
+else exit 1; fi
+CURLEOF
+  chmod +x "$fake_curl"
+
+  run_probe() {
+    PICAM_CURL="$fake_curl" PICAM_BOOT_DIR="$tmp_dir/boot" \
+    PICAM_DEFAULTS=/dev/null CAMERA_USER=admin CAMERA_PASS='' \
+    STATUS_LOG="$tmp_dir/status.log" \
+    bash "$script" 192.168.1.1
+  }
+
+  # --- scenario 1: UTCDateTime + LocalDateTime (the real bug: grep returns two lines) ---
+  cat > "$tmp_dir/time.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetSystemDateAndTimeResponse>
+<tds:SystemDateAndTime>
+<tt:UTCDateTime>
+<tt:Time><tt:Hour>6</tt:Hour><tt:Minute>1</tt:Minute><tt:Second>5</tt:Second></tt:Time>
+<tt:Date><tt:Year>2026</tt:Year><tt:Month>6</tt:Month><tt:Day>1</tt:Day></tt:Date>
+</tt:UTCDateTime>
+<tt:LocalDateTime>
+<tt:Time><tt:Hour>8</tt:Hour><tt:Minute>1</tt:Minute><tt:Second>5</tt:Second></tt:Time>
+<tt:Date><tt:Year>2026</tt:Year><tt:Month>6</tt:Month><tt:Day>1</tt:Day></tt:Date>
+</tt:LocalDateTime>
+</tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>
+XMLEOF
+  rm -f "$tmp_dir/boot/camera.conf"
+  check "time: UTC+Local double occurrence → probe exits 0" run_probe
+  check "time: UTC+Local double occurrence → camera.conf written" \
+    test -f "$tmp_dir/boot/camera.conf"
+
+  # --- scenario 2: single-digit fields → zero-padded ISO8601 (same XML, check format) ---
+  run_probe > "$tmp_dir/probe_out.txt" 2>/dev/null || true
+  check "time: single-digit fields → ISO8601 format" \
+    grep -qE 'created: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' \
+    "$tmp_dir/probe_out.txt"
+
+  # --- scenario 3: whitespace between > and digit value ---
+  cat > "$tmp_dir/time.xml" << 'XMLEOF'
+<s:Envelope><s:Body><tds:GetSystemDateAndTimeResponse>
+<tds:SystemDateAndTime><tt:UTCDateTime>
+<tt:Time>
+  <tt:Hour> 6 </tt:Hour><tt:Minute> 30 </tt:Minute><tt:Second> 0 </tt:Second>
+</tt:Time>
+<tt:Date>
+  <tt:Year> 2026 </tt:Year><tt:Month> 12 </tt:Month><tt:Day> 31 </tt:Day>
+</tt:Date>
+</tt:UTCDateTime></tds:SystemDateAndTime>
+</tds:GetSystemDateAndTimeResponse></s:Body></s:Envelope>
+XMLEOF
+  rm -f "$tmp_dir/boot/camera.conf"
+  check "time: whitespace in values → probe exits 0" run_probe
+
+  # --- scenario 4: malformed time response → fallback to Pi time, probe continues ---
+  cat > "$tmp_dir/time.xml" << 'XMLEOF'
+<s:Envelope><s:Body><s:Fault><s:Code>Receiver</s:Code></s:Fault></s:Body></s:Envelope>
+XMLEOF
+  rm -f "$tmp_dir/boot/camera.conf"
+  check "time: malformed → fallback to Pi time, probe exits 0" run_probe
+  check "time: malformed → camera.conf still written" test -f "$tmp_dir/boot/camera.conf"
+}
+
+# ---------------------------------------------------------------------------
+test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
 test_crlf_config_parsing
