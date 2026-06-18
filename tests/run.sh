@@ -637,6 +637,247 @@ XMLEOF
 }
 
 # ---------------------------------------------------------------------------
+test_capture_gate() {
+  echo "--- capture-gate.sh ---"
+  local script="$REPO_ROOT/pi/bin/capture-gate.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local stamp="$tmp_dir/last_shot"
+  local fired="$tmp_dir/fired"
+  # Fake capture: just writes a marker file.
+  local fake_capture="$tmp_dir/fake_capture.sh"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$fired" > "$fake_capture"
+  chmod +x "$fake_capture"
+
+  run_gate() {
+    PICAM_DEFAULTS=/dev/null \
+    PICAM_CAPTURE_CONF=/dev/null \
+    PICAM_CAPTURE="$fake_capture" \
+    LAST_SHOT_STAMP="$stamp" \
+    MODE="${MODE:-interval}" \
+    INTERVAL_MIN="${INTERVAL_MIN:-30}" \
+    WINDOW_START="${WINDOW_START:-07:00}" \
+    WINDOW_END="${WINDOW_END:-18:00}" \
+    TIMES="${TIMES:-08:00,12:00}" \
+    PICAM_NOW_HHMM="${PICAM_NOW_HHMM:-}" \
+    PICAM_NOW_EPOCH="${PICAM_NOW_EPOCH:-}" \
+    bash "$script"
+  }
+
+  # --- interval mode ---
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=10:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, no stamp, inside window → fires" test -f "$fired"
+
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=06:59 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, outside window (before start) → no fire" test ! -f "$fired"
+
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=18:01 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, outside window (after end) → no fire" test ! -f "$fired"
+
+  # Stamp is 25 min ago (< 30 min interval) → no fire
+  rm -f "$fired"
+  printf '%d\n' "$(( 1000000 - 25 * 60 ))" > "$stamp"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=10:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, stamp 25 min ago (< 30 min) → no fire" test ! -f "$fired"
+
+  # Stamp is 30 min ago (exactly) → fires
+  rm -f "$fired"
+  printf '%d\n' "$(( 1000000 - 30 * 60 ))" > "$stamp"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=10:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, stamp exactly 30 min ago → fires" test -f "$fired"
+
+  # Window boundary: at WINDOW_END exactly → fires if elapsed
+  rm -f "$fired"
+  printf '%d\n' "$(( 1000000 - 30 * 60 ))" > "$stamp"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=18:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, at WINDOW_END exactly → fires" test -f "$fired"
+
+  # Window boundary: at WINDOW_START exactly → fires (no stamp)
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  PICAM_NOW_HHMM=07:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: interval, at WINDOW_START exactly → fires" test -f "$fired"
+
+  # --- times mode ---
+  rm -f "$stamp" "$fired"
+  MODE=times TIMES=08:00,12:00,16:00 \
+  PICAM_NOW_HHMM=08:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: times, current HH:MM matches → fires" test -f "$fired"
+
+  rm -f "$stamp" "$fired"
+  MODE=times TIMES=08:00,12:00,16:00 \
+  PICAM_NOW_HHMM=09:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: times, no match → no fire" test ! -f "$fired"
+
+  # Double-fire guard: stamp is 30 sec ago (< 60 sec) → no fire
+  rm -f "$fired"
+  printf '%d\n' "$(( 1000000 - 30 ))" > "$stamp"
+  MODE=times TIMES=08:00,12:00,16:00 \
+  PICAM_NOW_HHMM=08:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: times, double-fire guard (30s ago) → no fire" test ! -f "$fired"
+
+  # Guard passed: stamp is 61 sec ago → fires
+  rm -f "$fired"
+  printf '%d\n' "$(( 1000000 - 61 ))" > "$stamp"
+  MODE=times TIMES=08:00,12:00,16:00 \
+  PICAM_NOW_HHMM=08:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: times, stamp 61s ago (> 60s guard) → fires" test -f "$fired"
+}
+
+# ---------------------------------------------------------------------------
+test_capture() {
+  echo "--- capture.sh ---"
+  local script="$REPO_ROOT/pi/bin/capture.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  mkdir -p "$tmp_dir/boot" "$tmp_dir/photos" "$tmp_dir/var"
+  local stamp="$tmp_dir/var/last_shot"
+  local failcount="$tmp_dir/var/fail_count"
+  local ip_cache="$tmp_dir/var/camera_ip"
+  local calls_file="$tmp_dir/calls"
+  true > "$calls_file"
+
+  # Fake discover: always returns 192.168.1.50
+  local fake_discover="$tmp_dir/discover.sh"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.50\\n"\n' > "$fake_discover"
+  chmod +x "$fake_discover"
+
+  # Fake curl: writes a valid JPEG (FF D8 + 11 KB zeros)
+  local fake_curl="$tmp_dir/curl.sh"
+  cat > "$fake_curl" << 'CURLEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "%CALLS%"
+output_file="" prev=""
+for arg in "$@"; do
+  case "$prev" in -o) output_file="$arg" ;; esac
+  prev="$arg"
+done
+if [ -n "$output_file" ]; then
+  printf '\xff\xd8\xff\xe0' > "$output_file"
+  dd if=/dev/zero bs=1024 count=11 >> "$output_file" 2>/dev/null
+fi
+CURLEOF
+  sed -i '' "s|%CALLS%|$calls_file|g" "$fake_curl" 2>/dev/null \
+    || sed -i "s|%CALLS%|$calls_file|g" "$fake_curl"
+  chmod +x "$fake_curl"
+
+  run_capture() {
+    PICAM_DEFAULTS=/dev/null \
+    PICAM_BOOT_DIR="$tmp_dir/boot" \
+    PICAM_CURL="$fake_curl" \
+    PICAM_DISCOVER="$fake_discover" \
+    JPEG_DIR="$tmp_dir/photos" \
+    RETENTION_DAYS=30 \
+    SNAPSHOT_URL='http://{IP}:80/onvif/Snapshot' \
+    CAMERA_USER=admin \
+    CAMERA_PASS='' \
+    CAMERA_IP_CACHE="$ip_cache" \
+    FAIL_COUNT_FILE="$failcount" \
+    LAST_SHOT_STAMP="$stamp" \
+    bash "$script"
+  }
+
+  # --- happy path ---
+  rm -f "$stamp" "$failcount"
+  check "capture: happy path → exits 0" run_capture
+  check "capture: JPEG saved in date subdir" \
+    bash -c "find '$tmp_dir/photos' -name '*.jpg' | grep -q ."
+  check "capture: last_photo.jpg copied to boot" \
+    test -f "$tmp_dir/boot/last_photo.jpg"
+  check "capture: last_shot stamp written" test -f "$stamp"
+  check "capture: fail_count reset to 0" bash -c \
+    "[ \"\$(cat '$failcount')\" = '0' ]"
+
+  # --- {IP} placeholder substituted ---
+  check "capture: {IP} substituted in curl URL" \
+    grep -q '192.168.1.50' "$calls_file"
+
+  # --- discovery failure → exit 1 + fail_count incremented ---
+  rm -f "$stamp" "$failcount"
+  local fail_discover="$tmp_dir/fail_discover.sh"
+  printf '#!/usr/bin/env bash\nexit 3\n' > "$fail_discover"
+  chmod +x "$fail_discover"
+  check "capture: discover fail → exit 1" bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_CURL='$fake_curl' PICAM_DISCOVER='$fail_discover' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    CAMERA_IP_CACHE='$ip_cache' FAIL_COUNT_FILE='$failcount' \
+    LAST_SHOT_STAMP='$stamp' \
+    bash '$script' >/dev/null 2>&1; [ \$? -eq 1 ]
+  "
+  check "capture: discover fail → fail_count incremented" bash -c \
+    "[ \"\$(cat '$failcount' 2>/dev/null || echo 0)\" -gt 0 ]"
+
+  # --- retry on snapshot failure: first curl fails, second succeeds ---
+  rm -f "$stamp" "$failcount"
+  local call_count_file="$tmp_dir/call_count"
+  printf '0\n' > "$call_count_file"
+  local retry_curl="$tmp_dir/retry_curl.sh"
+  cat > "$retry_curl" << CURLEOF
+#!/usr/bin/env bash
+n=\$(cat "$call_count_file" 2>/dev/null || echo 0)
+n=\$(( n + 1 ))
+printf '%d\n' "\$n" > "$call_count_file"
+output_file="" prev=""
+for arg in "\$@"; do
+  case "\$prev" in -o) output_file="\$arg" ;; esac
+  prev="\$arg"
+done
+if [ -n "\$output_file" ] && [ "\$n" -ge 2 ]; then
+  printf '\xff\xd8\xff\xe0' > "\$output_file"
+  dd if=/dev/zero bs=1024 count=11 >> "\$output_file" 2>/dev/null
+  exit 0
+fi
+exit 1
+CURLEOF
+  chmod +x "$retry_curl"
+  check "capture: first curl fail, retry succeeds → exits 0" bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_CURL='$retry_curl' PICAM_DISCOVER='$fake_discover' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    CAMERA_IP_CACHE='$ip_cache' FAIL_COUNT_FILE='$failcount' \
+    LAST_SHOT_STAMP='$stamp' \
+    bash '$script' >/dev/null 2>&1
+  "
+
+  # --- retention: old directory removed ---
+  local old_dir="$tmp_dir/photos/2020-01-01"
+  mkdir -p "$old_dir"
+  touch "$old_dir/120000.jpg"
+  run_capture > /dev/null 2>&1 || true
+  check "capture: old photo dir (>30d) pruned by retention" \
+    test ! -d "$old_dir"
+}
+
+# ---------------------------------------------------------------------------
 test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
@@ -647,6 +888,8 @@ test_systemd_units
 test_wifi_applier
 test_discover_camera
 test_onvif_probe
+test_capture_gate
+test_capture
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

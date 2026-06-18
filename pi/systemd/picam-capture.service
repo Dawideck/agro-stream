@@ -7,3 +7,7 @@ Type=oneshot
 RuntimeDirectory=picam
 RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/capture-gate.sh
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
