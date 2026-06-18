@@ -36,6 +36,11 @@ are Phase 2 — design for them, do not build them yet.
 
 These were confirmed against the real hardware. Treat as fact:
 
+- **Pi hostname: `pi`**. `install.sh` does NOT change the hostname.
+  Use `pi.local` in docs and examples — do not assume `picam.local`.
+- **All systemd services run as root** (no `User=` directive in any unit file).
+  `arp-scan` requires root (raw socket). `status.log` on FAT32 is root-writable only.
+  Manual script testing on the Pi requires `sudo`.
 - Camera MAC: `00:46:b8:28:e2:55`. DHCP enabled. Office IP at verification time:
   `192.168.251.113` (do NOT hardcode — discover by MAC at runtime).
 - ONVIF media service endpoint path: `/onvif/Media` (capital M).

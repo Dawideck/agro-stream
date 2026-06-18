@@ -11,11 +11,14 @@ STATUS_LOG="${STATUS_LOG:-/boot/firmware/picam/status.log}"
 STATUS_LOG_MAX_LINES="${STATUS_LOG_MAX_LINES:-200}"
 
 ts=$(date -u '+%Y-%m-%d %H:%M:%S')
-echo "$ts | $*" >> "$STATUS_LOG"
+
+# Write is best-effort — FAT32 boot partition is root-owned; manual runs need sudo.
+echo "$ts | $*" >> "$STATUS_LOG" 2>/dev/null \
+  || { echo "[status-write] WARNING: cannot write to $STATUS_LOG" >&2; exit 0; }
 
 line_count=$(wc -l < "$STATUS_LOG")
 if [ "$line_count" -gt "$STATUS_LOG_MAX_LINES" ]; then
   tmp=$(mktemp)
   tail -n "$STATUS_LOG_MAX_LINES" "$STATUS_LOG" > "$tmp"
-  mv "$tmp" "$STATUS_LOG"
+  mv "$tmp" "$STATUS_LOG" 2>/dev/null || rm -f "$tmp"
 fi

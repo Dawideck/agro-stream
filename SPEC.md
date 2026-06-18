@@ -261,6 +261,10 @@ Checks, in order, writing one summary line to `status.log`:
   office convenience), optional `--with-tailscale` flag (install + print the
   auth URL, do not block).
 - Idempotent: safe to re-run.
+- Does **not** change the hostname — leave it as the operator set it (default `pi`).
+  Adds `127.0.1.1 <hostname>` to `/etc/hosts` if missing (suppresses sudo warning).
+- All installed services run as root (no `User=` in unit files). `arp-scan` requires
+  a raw socket; manual runs of Pi scripts need `sudo`.
 
 ## 7. Acceptance criteria
 

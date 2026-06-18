@@ -67,9 +67,13 @@ if ! grep -q 'dtparam=watchdog=on' /boot/firmware/config.txt 2>/dev/null; then
   echo 'dtparam=watchdog=on' >> /boot/firmware/config.txt
 fi
 
-# ---- hostname ---------------------------------------------------------------
-echo "[install] Setting hostname to picam..."
-hostnamectl set-hostname picam
+# ---- /etc/hosts — suppress "sudo: unable to resolve host" warning -----------
+# Does not change the hostname; leave it as the operator set it.
+CURRENT_HOST=$(hostname)
+if ! grep -q "127.0.1.1.*$CURRENT_HOST" /etc/hosts 2>/dev/null; then
+  echo "127.0.1.1 $CURRENT_HOST" >> /etc/hosts
+  echo "[install] Added 127.0.1.1 $CURRENT_HOST to /etc/hosts"
+fi
 
 # ---- systemd enable ---------------------------------------------------------
 echo "[install] Enabling units..."
