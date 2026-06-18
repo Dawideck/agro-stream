@@ -11,7 +11,7 @@ card's FAT32 boot partition so a non-technical user can service it with only a
 macOS laptop (no extra software installed on the Mac).
 
 **MVP scope:** local storage only. **Out of scope for MVP (design for, don't
-implement):** upload to Cloudflare R2, GPRS/SMS alerting (optional module,
+implement):** upload to Cloudflare R2, email alerting (optional module,
 stubbed), Tailscale remote access (optional install flag).
 
 ## 2. Hardware & OS assumptions
@@ -48,7 +48,7 @@ stubbed), Tailscale remote access (optional install flag).
   happens on the Pi (Zero W could not decode the H.265+ streams anyway, which
   is why there is NO RTSP/ffmpeg fallback in scope for MVP). The snapshot URL
   is obtained via ONVIF GetSnapshotUri at install time (see `onvif-probe.sh`).
-- Optional GPRS HAT (SIM800-class, serial AT commands) — Phase 2.
+- Optional email alerting via `curl` SMTP/HTTP API — Phase 2 (no extra hardware).
 
 ## 3. Languages & constraints
 
@@ -80,7 +80,7 @@ picam/
 │   │   ├── healthcheck.sh     # boot + periodic diagnostics
 │   │   ├── wifi-applier.sh    # apply wifi-update.txt from boot partition
 │   │   ├── status-write.sh    # helper: append to status.log, rotate
-│   │   └── sms-alert.sh       # Phase 2 stub: rate-limited SMS via GPRS HAT
+│   │   └── alert.sh           # Phase 2 stub: rate-limited email alert via curl
 │   ├── systemd/
 │   │   ├── picam-capture.timer        # OnCalendar=*-*-* *:*:00 (every minute → gate)
 │   │   ├── picam-capture.service
@@ -233,7 +233,7 @@ Checks, in order, writing one summary line to `status.log`:
 3. Disk free > 500 MB (else prune oldest photo days and note it).
 4. Escalation ladder on consecutive failures: 3× network fail → restart
    NetworkManager; 6× → reboot (max one self-reboot per 6 h, tracked in
-   `/var/lib/picam/`); persistent camera fail → SMS stub call.
+   `/var/lib/picam/`); persistent camera fail → email alert stub call.
 
 ### 6.5 Watchdog & resilience
 - Enable hardware watchdog: `dtparam=watchdog=on` in `config.txt`; systemd
@@ -325,7 +325,7 @@ Checks, in order, writing one summary line to `status.log`:
 3. Router access at the target site (would allow DHCP reservation — nice to
    have, not required thanks to MAC discovery).
 4. Tailscale: yes/no (install flag exists either way).
-5. GPRS HAT exact model → Phase 2 `sms-alert.sh` implementation.
+5. Email provider choice → Phase 2 `alert.sh` implementation (Gmail SMTP app-password or HTTP API such as Resend/Mailgun; credentials in `/boot/firmware/picam/alert.conf`).
 
 ## Decisions (locked)
 
@@ -341,7 +341,7 @@ Checks, in order, writing one summary line to `status.log`:
 ## 11. Phase 2 (do not implement now)
 
 - R2 upload with local queue + retry; healthcheck extends to "R2 reachable".
-- SMS alerts via GPRS HAT (AT over serial), rate-limited to ≤ 3 SMS/day.
+- Email alerts via `curl` (SMTP with app-password or HTTP API), rate-limited to ≤ 3 emails/day. Credentials in `/boot/firmware/picam/alert.conf` on the FAT32 partition. Provider TBD (Gmail SMTP or Resend/Mailgun).
 - Optional overlayfs read-only root with a dedicated writable data partition.
 - **Contingency (only if no HTTP snapshot exists on this firmware):** a
   single-frame grab from the **mobile RTSP stream**
