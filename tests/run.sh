@@ -1152,6 +1152,115 @@ CURLEOF
 }
 
 # ---------------------------------------------------------------------------
+test_picam_config() {
+  echo "--- mac/picam-config.sh ---"
+  local script="$REPO_ROOT/mac/picam-config.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  # Build a fake SD card structure
+  local vol="$tmp_dir/bootfs/"
+  mkdir -p "${vol}picam"
+  touch "${vol}config.txt"
+
+  local fake_diskutil="$tmp_dir/diskutil.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/diskutil_calls"\n' \
+    "$tmp_dir" > "$fake_diskutil"
+  chmod +x "$fake_diskutil"
+  local fake_open="$tmp_dir/open.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/open_calls"\n' \
+    "$tmp_dir" > "$fake_open"
+  chmod +x "$fake_open"
+
+  run_config() {
+    PICAM_VOLUMES_ROOT="$tmp_dir" \
+    PICAM_DISKUTIL="$fake_diskutil" \
+    PICAM_OPEN="$fake_open" \
+    bash "$script"
+  }
+
+  # --- volume detection: structure present → exits menu (not "BŁĄD") ---
+  local ok_out="$tmp_dir/ok_out.txt"
+  printf '5\n' | run_config > "$ok_out" 2>&1 || true
+  check "config: valid volume detected → no BŁĄD" \
+    bash -c "! grep -q 'BŁĄD' '$ok_out'"
+
+  # --- volume detection: missing picam dir → BŁĄD ---
+  local no_vol_out="$tmp_dir/no_vol_out.txt"
+  PICAM_VOLUMES_ROOT="$tmp_dir/no_picam_root" \
+  PICAM_DISKUTIL="$fake_diskutil" PICAM_OPEN="$fake_open" \
+  bash "$script" > "$no_vol_out" 2>&1 || true
+  check "config: missing volume → BŁĄD message" \
+    grep -q 'BŁĄD' "$no_vol_out"
+
+  # --- WiFi write: verify format of wifi-update.txt ---
+  # Simulate: pick option 1 (WiFi), enter SSID, password, confirm no eject
+  printf '1\nTestSSID\nSekretne1\nSekretne1\nn\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" >/dev/null 2>&1 || true
+  check "config: wifi-update.txt created" \
+    test -f "${vol}picam/wifi-update.txt"
+  check "config: wifi-update.txt has SSID" \
+    grep -q 'SSID=TestSSID' "${vol}picam/wifi-update.txt"
+  check "config: wifi-update.txt has PASS" \
+    grep -q 'PASS=Sekretne1' "${vol}picam/wifi-update.txt"
+  check "config: wifi-update.txt has PRIORITY" \
+    grep -q 'PRIORITY=10' "${vol}picam/wifi-update.txt"
+  check "config: wifi-update.txt no CRLF (Unix line endings)" bash -c \
+    "! grep -qP '\r' '${vol}picam/wifi-update.txt' 2>/dev/null || \
+     ! cat -A '${vol}picam/wifi-update.txt' | grep -q '\^M'"
+
+  # --- WiFi eject: choosing T → diskutil called ---
+  rm -f "${vol}picam/wifi-update.txt" "$tmp_dir/diskutil_calls"
+  printf '1\nNewSSID\nHaslo123\nHaslo123\nT\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" >/dev/null 2>&1 || true
+  check "config: wifi eject confirmed → diskutil called" \
+    test -f "$tmp_dir/diskutil_calls"
+
+  # --- Schedule write: interval mode ---
+  local conf_file="${vol}picam/capture.conf"
+  printf 'MODE=interval\nINTERVAL_MIN=30\nWINDOW_START=07:00\nWINDOW_END=18:00\nTIMES=08:00\n' \
+    > "$conf_file"
+  printf '2\n1\n15\n06:00\n20:00\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" >/dev/null 2>&1 || true
+  check "config: schedule interval written → MODE=interval" \
+    grep -q 'MODE=interval' "$conf_file"
+  check "config: schedule interval written → INTERVAL_MIN=15" \
+    grep -q 'INTERVAL_MIN=15' "$conf_file"
+  check "config: schedule interval written → WINDOW_START=06:00" \
+    grep -q 'WINDOW_START=06:00' "$conf_file"
+
+  # --- Schedule write: times mode ---
+  printf '2\n2\n09:00,15:00\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" >/dev/null 2>&1 || true
+  check "config: schedule times written → MODE=times" \
+    grep -q 'MODE=times' "$conf_file"
+  check "config: schedule times written → TIMES preserved" \
+    grep -q 'TIMES=09:00,15:00' "$conf_file"
+
+  # --- Show photo: last_photo.jpg present → open called ---
+  touch "${vol}picam/last_photo.jpg"
+  rm -f "$tmp_dir/open_calls"
+  printf '4\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" >/dev/null 2>&1 || true
+  check "config: show photo → open called" test -f "$tmp_dir/open_calls"
+
+  # --- Show status: status.log present → last lines shown ---
+  printf 'line1\nline2\nline3\n' > "${vol}picam/status.log"
+  local status_out="$tmp_dir/status_out.txt"
+  printf '3\n5\n' \
+    | PICAM_VOLUMES_ROOT="$tmp_dir" PICAM_DISKUTIL="$fake_diskutil" \
+      PICAM_OPEN="$fake_open" bash "$script" > "$status_out" 2>&1 || true
+  check "config: show status → log content shown" grep -q 'line2' "$status_out"
+}
+
+# ---------------------------------------------------------------------------
 test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1274,7 @@ test_onvif_probe
 test_capture_gate
 test_capture
 test_healthcheck
+test_picam_config
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
