@@ -878,6 +878,280 @@ CURLEOF
 }
 
 # ---------------------------------------------------------------------------
+test_healthcheck() {
+  echo "--- healthcheck.sh ---"
+  local script="$REPO_ROOT/pi/bin/healthcheck.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  mkdir -p "$tmp_dir/boot" "$tmp_dir/photos" "$tmp_dir/var" "$tmp_dir/run"
+
+  local failcount="$tmp_dir/var/fail_count"
+  local netfail="$tmp_dir/var/net_fail"
+  local stamp="$tmp_dir/var/last_shot"
+  local last_reboot="$tmp_dir/var/last_reboot"
+  local boot_marker="$tmp_dir/run/hc_booted"
+  local systemctl_calls="$tmp_dir/systemctl_calls"
+  local alert_calls="$tmp_dir/alert_calls"
+
+  # Fake ip: outputs a default route with a gateway
+  local fake_ip="$tmp_dir/ip.sh"
+  printf '#!/usr/bin/env bash\necho "default via 192.168.1.1 dev wlan0"\n' > "$fake_ip"
+  chmod +x "$fake_ip"
+
+  # Fake ping: succeeds by default
+  local fake_ping="$tmp_dir/ping.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_ping"
+  chmod +x "$fake_ping"
+
+  # Fake discover: returns IP
+  local fake_discover="$tmp_dir/discover.sh"
+  printf '#!/usr/bin/env bash\nprintf "192.168.1.50\\n"\n' > "$fake_discover"
+  chmod +x "$fake_discover"
+
+  # Fake curl: returns valid JPEG
+  local fake_curl="$tmp_dir/curl.sh"
+  cat > "$fake_curl" << 'CURLEOF'
+#!/usr/bin/env bash
+output_file="" prev=""
+for arg in "$@"; do
+  case "$prev" in -o) output_file="$arg" ;; esac
+  prev="$arg"
+done
+[ -n "$output_file" ] && printf '\xff\xd8\xff\xe0' > "$output_file" \
+  && dd if=/dev/zero bs=1024 count=11 >> "$output_file" 2>/dev/null
+CURLEOF
+  chmod +x "$fake_curl"
+
+  # Fake systemctl: records calls
+  local fake_systemctl="$tmp_dir/systemctl.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' \
+    "$systemctl_calls" > "$fake_systemctl"
+  chmod +x "$fake_systemctl"
+
+  # Fake alert: records calls
+  local fake_alert="$tmp_dir/alert.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' \
+    "$alert_calls" > "$fake_alert"
+  chmod +x "$fake_alert"
+
+  run_hc() {
+    PICAM_DEFAULTS=/dev/null \
+    PICAM_BOOT_DIR="$tmp_dir/boot" \
+    PICAM_HC_MODE="${PICAM_HC_MODE:-boot}" \
+    PICAM_BOOT_MARKER="$boot_marker" \
+    PICAM_IP_CMD="$fake_ip" \
+    PICAM_PING="$fake_ping" \
+    PICAM_DISCOVER="${PICAM_DISCOVER_OVERRIDE:-$fake_discover}" \
+    PICAM_CURL="$fake_curl" \
+    PICAM_SYSTEMCTL="$fake_systemctl" \
+    PICAM_ALERT="$fake_alert" \
+    JPEG_DIR="$tmp_dir/photos" \
+    SNAPSHOT_URL='http://{IP}:80/onvif/Snapshot' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 \
+    WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP="$stamp" \
+    FAIL_COUNT_FILE="$failcount" \
+    NETWORK_FAIL_COUNT_FILE="$netfail" \
+    LAST_REBOOT_FILE="$last_reboot" \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 \
+    HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 \
+    PICAM_DISK_AVAIL_KB=600000 \
+    bash "$script"
+  }
+
+  # --- boot mode: network + camera OK ---
+  rm -f "$failcount" "$netfail" "$stamp" "$last_reboot" "$boot_marker" \
+    "$systemctl_calls" "$alert_calls"
+  check "hc: boot mode, all OK → exits 0" run_hc
+  check "hc: boot mode → fail_count reset to 0" bash -c \
+    "[ \"\$(cat '$failcount' 2>/dev/null || echo 0)\" = '0' ]"
+
+  # --- hourly mode: last photo recent → OK ---
+  rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  printf '%d\n' "$(date -u +%s)" > "$stamp"
+  PICAM_HC_MODE=hourly run_hc
+  check "hc: hourly, recent photo → exits 0" [ $? -eq 0 ] || true
+  check "hc: hourly, recent photo → status OK (no alert)" \
+    test ! -f "$alert_calls"
+
+  # --- network fail → fail_count incremented, no escalation yet ---
+  rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  local fail_ping="$tmp_dir/fail_ping.sh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fail_ping"; chmod +x "$fail_ping"
+  check "hc: network fail → exits 1" bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_HC_MODE=hourly PICAM_BOOT_MARKER='$boot_marker' \
+    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fail_ping' \
+    PICAM_DISCOVER='$fake_discover' PICAM_CURL='$fake_curl' \
+    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
+    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+    bash '$script' >/dev/null 2>&1; [ \$? -eq 1 ]
+  "
+  check "hc: network fail → network_fail_count = 1" bash -c \
+    "[ \"\$(cat '$netfail' 2>/dev/null || echo 0)\" -eq 1 ]"
+  check "hc: network fail (1x) → no NM restart yet" \
+    bash -c "! grep -q 'NetworkManager' '$systemctl_calls' 2>/dev/null"
+
+  # --- network fail 3× → NetworkManager restart ---
+  printf '3\n' > "$netfail"
+  true > "$systemctl_calls"
+  bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_HC_MODE=hourly PICAM_BOOT_MARKER='$boot_marker' \
+    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fail_ping' \
+    PICAM_DISCOVER='$fake_discover' PICAM_CURL='$fake_curl' \
+    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
+    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+    bash '$script' >/dev/null 2>&1 || true
+  "
+  check "hc: network fail (3x) → NM restart called" \
+    grep -q 'NetworkManager' "$systemctl_calls"
+
+  # --- network fail 6× → reboot (no cooldown) ---
+  printf '6\n' > "$netfail"
+  printf '0\n' > "$last_reboot"
+  true > "$systemctl_calls"
+  bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_HC_MODE=hourly PICAM_BOOT_MARKER='$boot_marker' \
+    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fail_ping' \
+    PICAM_DISCOVER='$fake_discover' PICAM_CURL='$fake_curl' \
+    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
+    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+    bash '$script' >/dev/null 2>&1 || true
+  "
+  check "hc: network fail (6x, no cooldown) → reboot called" \
+    grep -q 'reboot' "$systemctl_calls"
+
+  # --- reboot cooldown: recent reboot → no second reboot ---
+  printf '6\n' > "$netfail"
+  printf '%d\n' "$(date -u +%s)" > "$last_reboot"
+  true > "$systemctl_calls"
+  bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_HC_MODE=hourly PICAM_BOOT_MARKER='$boot_marker' \
+    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fail_ping' \
+    PICAM_DISCOVER='$fake_discover' PICAM_CURL='$fake_curl' \
+    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
+    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+    bash '$script' >/dev/null 2>&1 || true
+  "
+  check "hc: reboot cooldown → reboot NOT called" \
+    bash -c "! grep -q 'reboot' '$systemctl_calls' 2>/dev/null"
+
+  # --- camera fail N× ≥ threshold → alert called ---
+  rm -f "$netfail" "$systemctl_calls"
+  printf '6\n' > "$failcount"
+  true > "$alert_calls"
+  local fail_discover="$tmp_dir/fail_discover.sh"
+  printf '#!/usr/bin/env bash\nexit 3\n' > "$fail_discover"; chmod +x "$fail_discover"
+  bash -c "
+    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
+    PICAM_HC_MODE=boot PICAM_BOOT_MARKER='$tmp_dir/run/hc2' \
+    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fake_ping' \
+    PICAM_DISCOVER='$fail_discover' PICAM_CURL='$fake_curl' \
+    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
+    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
+    CAMERA_USER=admin CAMERA_PASS='' \
+    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
+    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
+    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+    bash '$script' >/dev/null 2>&1 || true
+  "
+  check "hc: camera fail (≥ threshold) → alert called" \
+    test -f "$alert_calls"
+
+  # --- disk low → prune oldest day ---
+  mkdir -p "$tmp_dir/photos/2020-06-01"
+  touch "$tmp_dir/photos/2020-06-01/120000.jpg"
+  rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  printf '%d\n' "$(date -u +%s)" > "$stamp"
+  PICAM_HC_MODE=hourly PICAM_DISK_AVAIL_KB=400000 \
+  PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR="$tmp_dir/boot" \
+  PICAM_BOOT_MARKER="$boot_marker" \
+  PICAM_IP_CMD="$fake_ip" PICAM_PING="$fake_ping" \
+  PICAM_DISCOVER="$fake_discover" PICAM_CURL="$fake_curl" \
+  PICAM_SYSTEMCTL="$fake_systemctl" PICAM_ALERT="$fake_alert" \
+  JPEG_DIR="$tmp_dir/photos" SNAPSHOT_URL='http://{IP}/snap' \
+  CAMERA_USER=admin CAMERA_PASS='' \
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  LAST_SHOT_STAMP="$stamp" FAIL_COUNT_FILE="$failcount" \
+  NETWORK_FAIL_COUNT_FILE="$netfail" LAST_REBOOT_FILE="$last_reboot" \
+  HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+  HEALTH_REBOOT_COOLDOWN_SEC=21600 \
+  bash "$script" >/dev/null 2>&1 || true
+  check "hc: disk low → oldest day pruned" \
+    test ! -d "$tmp_dir/photos/2020-06-01"
+
+  # --- auto mode: first run = boot, second run = hourly ---
+  rm -f "$boot_marker" "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  printf '%d\n' "$(date -u +%s)" > "$stamp"
+  local auto_out1="$tmp_dir/auto_out1.txt"
+  local auto_out2="$tmp_dir/auto_out2.txt"
+  PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR="$tmp_dir/boot" \
+  PICAM_HC_MODE=auto PICAM_BOOT_MARKER="$boot_marker" \
+  PICAM_IP_CMD="$fake_ip" PICAM_PING="$fake_ping" \
+  PICAM_DISCOVER="$fake_discover" PICAM_CURL="$fake_curl" \
+  PICAM_SYSTEMCTL="$fake_systemctl" PICAM_ALERT="$fake_alert" \
+  JPEG_DIR="$tmp_dir/photos" SNAPSHOT_URL='http://{IP}/snap' \
+  CAMERA_USER=admin CAMERA_PASS='' \
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  LAST_SHOT_STAMP="$stamp" FAIL_COUNT_FILE="$failcount" \
+  NETWORK_FAIL_COUNT_FILE="$netfail" LAST_REBOOT_FILE="$last_reboot" \
+  HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+  HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+  bash "$script" > "$auto_out1" 2>&1 || true
+  PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR="$tmp_dir/boot" \
+  PICAM_HC_MODE=auto PICAM_BOOT_MARKER="$boot_marker" \
+  PICAM_IP_CMD="$fake_ip" PICAM_PING="$fake_ping" \
+  PICAM_DISCOVER="$fake_discover" PICAM_CURL="$fake_curl" \
+  PICAM_SYSTEMCTL="$fake_systemctl" PICAM_ALERT="$fake_alert" \
+  JPEG_DIR="$tmp_dir/photos" SNAPSHOT_URL='http://{IP}/snap' \
+  CAMERA_USER=admin CAMERA_PASS='' \
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
+  LAST_SHOT_STAMP="$stamp" FAIL_COUNT_FILE="$failcount" \
+  NETWORK_FAIL_COUNT_FILE="$netfail" LAST_REBOOT_FILE="$last_reboot" \
+  HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+  HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
+  bash "$script" > "$auto_out2" 2>&1 || true
+  check "hc: auto mode — first run is boot" \
+    grep -q 'healthcheck/boot' "$auto_out1"
+  check "hc: auto mode — second run is hourly" \
+    grep -q 'healthcheck/hourly' "$auto_out2"
+}
+
+# ---------------------------------------------------------------------------
 test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
@@ -890,6 +1164,7 @@ test_discover_camera
 test_onvif_probe
 test_capture_gate
 test_capture
+test_healthcheck
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

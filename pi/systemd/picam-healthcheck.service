@@ -7,3 +7,7 @@ Type=oneshot
 RuntimeDirectory=picam
 RuntimeDirectoryPreserve=yes
 ExecStart=/usr/local/bin/healthcheck.sh
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=2
