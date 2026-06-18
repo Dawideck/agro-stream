@@ -144,7 +144,9 @@ echo "=== GetSnapshotUri ==="
 created=$(get_camera_created)
 snap=$(soap_post "$media_xaddr" \
   "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Header>$(make_security_header "$created")</s:Header><s:Body><GetSnapshotUri xmlns=\"http://www.onvif.org/ver10/media/wsdl\"><ProfileToken>$token</ProfileToken></GetSnapshotUri></s:Body></s:Envelope>")
-snapshot_url=$(printf '%s' "$snap" | grep -oiE 'http[s]?://[^<]*' | head -1 || true)
+# Look specifically inside <tt:Uri> / <Uri> element content, not xmlns attributes.
+# The SOAP envelope has many xmlns:xxx="http://..." that would fool a plain http grep.
+snapshot_url=$(printf '%s' "$snap" | grep -oiE '[Uu][Rr][Ii]>[^<]*' | grep -oiE 'https?://[^<]*' | head -1 || true)
 
 if [ -z "$snapshot_url" ]; then
   echo "FAIL: no snapshot URI." >&2
