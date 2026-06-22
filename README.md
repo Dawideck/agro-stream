@@ -205,6 +205,32 @@ Pliki konfiguracyjne są zwykłym tekstem i można je edytować w edytorze:
 
 ---
 
+## Alerty email
+
+PiCam wysyła alert emailem gdy kamera jest niedostępna przez dłuższy czas
+(domyślnie 6 nieudanych prób z rzędu). Maksymalnie 3 alerty dziennie.
+
+### Konfiguracja (Gmail)
+
+1. Załóż dedykowane konto Gmail (np. `picam-sender@gmail.com`).
+2. Włącz **weryfikację dwuetapową** na tym koncie.
+3. Przejdź do: Konto Google → Bezpieczeństwo → **Hasła do aplikacji** →
+   utwórz nowe hasło dla „PiCam" (pojawi się 16-znakowy kod).
+4. Wyjmij kartę SD, włóż do MacBooka, otwórz plik `picam/alert.conf`
+   w edytorze tekstowym i uzupełnij:
+   ```
+   FROM=picam-sender@gmail.com
+   TO=twoj-adres@example.com
+   SMTP_USER=picam-sender@gmail.com
+   SMTP_PASS=xxxx xxxx xxxx xxxx
+   RATE_LIMIT_PER_DAY=3
+   ```
+5. Zapisz plik i włóż kartę z powrotem do Pi.
+
+> Plik `alert.conf` jest zapisany z uprawnieniami `600` (tylko root może czytać).
+
+---
+
 ## Gdzie są zdjęcia
 
 Zdjęcia są zapisywane na partycji rootfs Pi (ext4, niewidocznej na MacBooku)

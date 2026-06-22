@@ -1152,6 +1152,101 @@ CURLEOF
 }
 
 # ---------------------------------------------------------------------------
+test_alert() {
+  echo "--- alert.sh ---"
+  local script="$REPO_ROOT/pi/bin/alert.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local boot_dir="$tmp_dir/picam"
+  local state_dir="$tmp_dir/state"
+  mkdir -p "$boot_dir" "$state_dir"
+
+  # Fake curl: records args to a file, succeeds
+  local fake_curl="$tmp_dir/curl.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/curl_calls"\ncat /dev/stdin >> "%s/curl_stdin"\n' \
+    "$tmp_dir" "$tmp_dir" > "$fake_curl"
+  chmod +x "$fake_curl"
+
+  run_alert() {
+    PICAM_BOOT_DIR="$boot_dir" \
+    PICAM_ALERT_CONF="$boot_dir/alert.conf" \
+    PICAM_ALERT_STATE_DIR="$state_dir" \
+    PICAM_CURL="$fake_curl" \
+    PICAM_NOW_DATE="2026-06-22" \
+    bash "$script" "$@" 2>/dev/null || true
+  }
+
+  write_conf() {
+    printf 'FROM=sender@gmail.com\nTO=recv@example.com\nSMTP_USER=sender@gmail.com\nSMTP_PASS=testpass\nRATE_LIMIT_PER_DAY=3\n' \
+      > "$boot_dir/alert.conf"
+  }
+
+  # --- no alert.conf → silently skips ---
+  rm -f "$boot_dir/alert.conf" "$tmp_dir/curl_calls"
+  run_alert "test message"
+  check "alert: no alert.conf → curl not called" \
+    bash -c "[ ! -f '$tmp_dir/curl_calls' ]"
+
+  # --- incomplete conf (missing TO) → skips ---
+  printf 'FROM=a@b.com\nSMTP_USER=a@b.com\nSMTP_PASS=x\n' > "$boot_dir/alert.conf"
+  rm -f "$tmp_dir/curl_calls"
+  run_alert "test"
+  check "alert: incomplete conf → curl not called" \
+    bash -c "[ ! -f '$tmp_dir/curl_calls' ]"
+
+  # --- valid conf → curl called with smtps ---
+  write_conf
+  rm -f "$tmp_dir/curl_calls" "$tmp_dir/curl_stdin"
+  run_alert "kamera niedostepna"
+  check "alert: valid conf → curl called" \
+    test -f "$tmp_dir/curl_calls"
+  check "alert: curl uses smtps" \
+    grep -q 'smtps://smtp.gmail.com' "$tmp_dir/curl_calls"
+  check "alert: email body contains message" \
+    grep -q 'kamera niedostepna' "$tmp_dir/curl_stdin"
+  check "alert: rate file created" \
+    test -f "$state_dir/alert_rate"
+  check "alert: rate file has count 1" \
+    grep -q '2026-06-22 1' "$state_dir/alert_rate"
+
+  # --- second send same day → count 2 ---
+  rm -f "$tmp_dir/curl_calls"
+  run_alert "drugi alert"
+  check "alert: second send → count 2" \
+    grep -q '2026-06-22 2' "$state_dir/alert_rate"
+
+  # --- third send same day → count 3 ---
+  rm -f "$tmp_dir/curl_calls"
+  run_alert "trzeci alert"
+  check "alert: third send → count 3" \
+    grep -q '2026-06-22 3' "$state_dir/alert_rate"
+
+  # --- fourth send same day → rate limit, curl NOT called ---
+  rm -f "$tmp_dir/curl_calls"
+  run_alert "czwarty alert"
+  check "alert: rate limit → curl not called" \
+    bash -c "[ ! -f '$tmp_dir/curl_calls' ]"
+  check "alert: rate file still 3 after limit" \
+    grep -q '2026-06-22 3' "$state_dir/alert_rate"
+
+  # --- next day → counter resets, curl called again ---
+  rm -f "$tmp_dir/curl_calls"
+  PICAM_BOOT_DIR="$boot_dir" \
+  PICAM_ALERT_CONF="$boot_dir/alert.conf" \
+  PICAM_ALERT_STATE_DIR="$state_dir" \
+  PICAM_CURL="$fake_curl" \
+  PICAM_NOW_DATE="2026-06-23" \
+  bash "$script" "nowy dzien" 2>/dev/null || true
+  check "alert: next day → curl called again" \
+    test -f "$tmp_dir/curl_calls"
+  check "alert: next day → rate file reset to 1" \
+    grep -q '2026-06-23 1' "$state_dir/alert_rate"
+}
+
+# ---------------------------------------------------------------------------
 test_picam_config() {
   echo "--- mac/picam-config.sh ---"
   local script="$REPO_ROOT/mac/picam-config.sh"
@@ -1275,6 +1370,7 @@ test_capture_gate
 test_capture
 test_healthcheck
 test_picam_config
+test_alert
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
