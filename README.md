@@ -248,6 +248,24 @@ Popraw przez `[1]` w menu skryptu i ponownie włóż kartę.
 - Karta musi mieć folder `picam/` — jeśli `install.sh` jeszcze nie był
   uruchomiony, folder nie istnieje.
 
+### Kamera nie jest wykrywana — administrator podał IP wprost
+
+Jeśli router ma włączoną izolację klientów (WiFi client isolation), `arp-scan`
+nie dotrze do kamery. Jeśli administrator sieci zapewnił stały adres IP kamery
+(rezerwacja DHCP lub IP statyczne), możesz wpisać go do cache'a ręcznie przez SSH:
+
+```bash
+ssh pi@pi.local
+echo "192.168.1.50" | sudo tee /var/lib/picam/camera_ip
+```
+
+Przy następnym zdjęciu Pi użyje tego IP bezpośrednio, pomijając `arp-scan`.
+
+> **Ważne:** jeśli kamera ma DHCP bez rezerwacji, IP może się zmienić po
+> restarcie routera i Pi znowu nie znajdzie kamery. W środowisku z izolacją
+> klientów **koniecznie poproś administratora o rezerwację DHCP** (stały IP
+> przypisany do MAC `00:46:b8:28:e2:55`).
+
 ### Jak sprawdzić logi Pi przez SSH
 
 ```bash
