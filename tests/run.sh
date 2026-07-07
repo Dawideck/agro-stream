@@ -1261,6 +1261,91 @@ test_picam_config() {
 }
 
 # ---------------------------------------------------------------------------
+test_export_photos() {
+  echo "--- export-photos.sh ---"
+  local script="$REPO_ROOT/pi/bin/export-photos.sh"
+
+  local jpeg_dir export_dir chown_log
+  jpeg_dir=$(mktemp -d)
+  export_dir=$(mktemp -d)
+  chown_log=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$jpeg_dir' '$export_dir' '$chown_log'" RETURN
+
+  # Fake chown: records calls without requiring root
+  local fake_chown="$jpeg_dir/fake_chown.sh"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$chown_log" > "$fake_chown"
+  chmod +x "$fake_chown"
+
+  run_export() {
+    PICAM_JPEG_DIR="$jpeg_dir" \
+    PICAM_EXPORT_DIR="$export_dir" \
+    PICAM_CHOWN="$fake_chown" \
+    PICAM_OWNER="agro" \
+    bash "$script" "$@"
+  }
+
+  # Populate fake photo dirs
+  mkdir -p "$jpeg_dir/2026-05-01" "$jpeg_dir/2026-06-15" "$jpeg_dir/2026-07-01"
+  touch "$jpeg_dir/2026-05-01/080000.jpg"
+  touch "$jpeg_dir/2026-06-15/120000.jpg"
+  touch "$jpeg_dir/2026-07-01/160000.jpg"
+
+  # --- no args: all days exported ---
+  local out="$jpeg_dir/out_all.txt"
+  run_export > "$out" 2>&1
+  check "export: no args → all 3 days copied" \
+    bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 3 ]"
+  check "export: no args → count in output" grep -q 'Exported 3 day' "$out"
+  check "export: scp command shown" grep -q 'scp -r' "$out"
+  check "export: chown called with owner" grep -q 'agro:agro' "$chown_log"
+
+  # --- --from: only days >= 2026-06-15 ---
+  rm -rf "${export_dir:?}"/* && true > "$chown_log"
+  run_export --from 2026-06-15 > /dev/null 2>&1
+  check "export: --from 2026-06-15 → 2 days" \
+    bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]"
+  check "export: --from → 2026-05-01 excluded" \
+    test ! -d "$export_dir/2026-05-01"
+
+  # --- --to: only days <= 2026-06-15 ---
+  rm -rf "${export_dir:?}"/*
+  run_export --to 2026-06-15 > /dev/null 2>&1
+  check "export: --to 2026-06-15 → 2 days" \
+    bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]"
+  check "export: --to → 2026-07-01 excluded" \
+    test ! -d "$export_dir/2026-07-01"
+
+  # --- --from + --to: exact range ---
+  rm -rf "${export_dir:?}"/*
+  run_export --from 2026-06-15 --to 2026-06-15 > /dev/null 2>&1
+  check "export: exact range → 1 day" \
+    bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]"
+  check "export: exact range → correct day" test -d "$export_dir/2026-06-15"
+
+  # --- no matching days → exit 0, message, no chown ---
+  true > "$chown_log"
+  local no_out="$jpeg_dir/out_none.txt"
+  run_export --from 2030-01-01 > "$no_out" 2>&1 || true
+  check "export: no match → no chown called" bash -c "[ ! -s '$chown_log' ]"
+  check "export: no match → message shown" grep -q 'No photos found' "$no_out"
+
+  # --- invalid date → exit 1 ---
+  local bad_out="$jpeg_dir/out_bad.txt"
+  PICAM_JPEG_DIR="$jpeg_dir" PICAM_EXPORT_DIR="$export_dir" \
+  PICAM_CHOWN="$fake_chown" PICAM_OWNER="agro" \
+  bash "$script" --from "not-a-date" > "$bad_out" 2>&1 || true
+  check "export: invalid --from → error message" grep -q 'Invalid' "$bad_out"
+
+  # --- missing JPEG_DIR → exit 1 ---
+  local missing_out="$jpeg_dir/out_missing.txt"
+  PICAM_JPEG_DIR="/nonexistent/path" PICAM_EXPORT_DIR="$export_dir" \
+  PICAM_CHOWN="$fake_chown" PICAM_OWNER="agro" \
+  bash "$script" > "$missing_out" 2>&1 || true
+  check "export: missing JPEG_DIR → error message" grep -q 'not found' "$missing_out"
+}
+
+# ---------------------------------------------------------------------------
 test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1360,7 @@ test_capture_gate
 test_capture
 test_healthcheck
 test_picam_config
+test_export_photos
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
