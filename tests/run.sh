@@ -717,6 +717,27 @@ test_capture_gate() {
   run_gate
   check "gate: interval, at WINDOW_START exactly → fires" test -f "$fired"
 
+  # Window wrap-around (21:00–20:00): inside window after midnight → fires
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=21:00 WINDOW_END=20:00 \
+  PICAM_NOW_HHMM=09:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: wrap-around window, 09:00 → fires" test -f "$fired"
+
+  # Window wrap-around (21:00–20:00): inside window in evening → fires
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=21:00 WINDOW_END=20:00 \
+  PICAM_NOW_HHMM=22:00 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: wrap-around window, 22:00 → fires" test -f "$fired"
+
+  # Window wrap-around (21:00–20:00): at excluded edge (20:30) → no fire
+  rm -f "$stamp" "$fired"
+  MODE=interval INTERVAL_MIN=30 WINDOW_START=21:00 WINDOW_END=20:00 \
+  PICAM_NOW_HHMM=20:30 PICAM_NOW_EPOCH=1000000 \
+  run_gate
+  check "gate: wrap-around window, 20:30 (excluded gap) → no fire" test ! -f "$fired"
+
   # --- times mode ---
   rm -f "$stamp" "$fired"
   MODE=times TIMES=08:00,12:00,16:00 \

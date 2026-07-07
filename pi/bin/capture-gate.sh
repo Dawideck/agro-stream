@@ -29,7 +29,13 @@ _in_window() {
   s=$(_to_min "${WINDOW_START:-07:00}")
   e=$(_to_min "${WINDOW_END:-18:00}")
   n=$(_to_min "$now_hm")
-  [ "$n" -ge "$s" ] && [ "$n" -le "$e" ]
+  if [ "$s" -le "$e" ]; then
+    # Normal window e.g. 07:00–18:00
+    [ "$n" -ge "$s" ] && [ "$n" -le "$e" ]
+  else
+    # Wrap-around window e.g. 21:00–20:00 (crosses midnight)
+    [ "$n" -ge "$s" ] || [ "$n" -le "$e" ]
+  fi
 }
 
 _last_shot_epoch() {
