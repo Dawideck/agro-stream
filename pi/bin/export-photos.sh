@@ -43,6 +43,7 @@ if [ ! -d "$JPEG_DIR" ]; then
   exit 1
 fi
 
+rm -rf "$EXPORT_DIR"
 mkdir -p "$EXPORT_DIR"
 count=0
 

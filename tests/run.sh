@@ -1321,8 +1321,15 @@ test_export_photos() {
   check "export: scp command shown" grep -q 'scp -r' "$out"
   check "export: chown called with owner" grep -q 'agro:agro' "$chown_log"
 
+  # --- re-run wipes stale files: run all, then run narrower range ---
+  run_export --from 2026-07-01 > /dev/null 2>&1
+  check "export: re-run wipes stale days from previous export" \
+    test ! -d "$export_dir/2026-05-01"
+  check "export: re-run keeps days in new range" \
+    test -d "$export_dir/2026-07-01"
+
   # --- --from: only days >= 2026-06-15 ---
-  rm -rf "${export_dir:?}"/* && true > "$chown_log"
+  true > "$chown_log"
   run_export --from 2026-06-15 > /dev/null 2>&1
   check "export: --from 2026-06-15 → 2 days" \
     bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]"
@@ -1330,7 +1337,6 @@ test_export_photos() {
     test ! -d "$export_dir/2026-05-01"
 
   # --- --to: only days <= 2026-06-15 ---
-  rm -rf "${export_dir:?}"/*
   run_export --to 2026-06-15 > /dev/null 2>&1
   check "export: --to 2026-06-15 → 2 days" \
     bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]"
@@ -1338,7 +1344,6 @@ test_export_photos() {
     test ! -d "$export_dir/2026-07-01"
 
   # --- --from + --to: exact range ---
-  rm -rf "${export_dir:?}"/*
   run_export --from 2026-06-15 --to 2026-06-15 > /dev/null 2>&1
   check "export: exact range → 1 day" \
     bash -c "[ \$(find '$export_dir' -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]"
