@@ -68,6 +68,9 @@ fi
 
 "$CHOWN_CMD" -R "$OWNER:$OWNER" "$EXPORT_DIR"
 
+PI_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+PI_ADDR="${PI_IP:-pi.local}"
+
 printf '\nExported %d day(s) to %s (owner: %s)\n' "$count" "$EXPORT_DIR" "$OWNER"
 printf '\nDownload on your Mac:\n'
-printf '  scp -r %s@pi.local:%s ./picam-photos\n\n' "$OWNER" "$EXPORT_DIR"
+printf '  scp -r %s@%s:%s ./picam-photos\n\n' "$OWNER" "$PI_ADDR" "$EXPORT_DIR"
