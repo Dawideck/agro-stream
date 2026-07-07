@@ -1,12 +1,12 @@
 [Unit]
-Description=PiCam capture gate
+Description=PiCam snapshot capture
 After=network-online.target
 
 [Service]
 Type=oneshot
 RuntimeDirectory=picam
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/bin/capture-gate.sh
+ExecStart=/bin/bash -c '/usr/local/bin/capture-gate.sh || exit 0; /usr/local/bin/capture.sh'
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
