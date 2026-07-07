@@ -50,6 +50,9 @@ fi
 if [ ! -f "$BOOT_PICAM/camera.conf" ]; then
   install -m 644 "$REPO_DIR/pi/etc/camera.conf.template" "$BOOT_PICAM/camera.conf"
 fi
+if [ ! -f "$BOOT_PICAM/alert.conf" ]; then
+  install -m 600 "$REPO_DIR/pi/etc/alert.conf.template" "$BOOT_PICAM/alert.conf"
+fi
 
 # ---- systemd units ----------------------------------------------------------
 echo "[install] Installing systemd units..."
