@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # One-time office setup: discover ONVIF snapshot URL, write camera.conf.
-# Usage: onvif-probe.sh <camera-ip>
+# Usage: onvif-probe.sh <camera-ip> [--list-profiles] [--test-url <url>]
+#   --list-profiles   Print all ONVIF profiles with pixel dimensions, then exit.
+#   --test-url <url>  Fetch a snapshot from <url> and report size/validity, then exit.
 # WS-Security math copied verbatim from verified prototype probe.sh.
 set -euo pipefail
 
@@ -10,9 +12,25 @@ source <(sed 's/\r//g' "$DEFAULTS" 2>/dev/null || true)
 
 IP="${1:-}"
 if [ -z "$IP" ]; then
-  echo "Usage: onvif-probe.sh <camera-ip>" >&2
+  echo "Usage: onvif-probe.sh <camera-ip> [--list-profiles] [--test-url <url>]" >&2
   exit 1
 fi
+
+LIST_PROFILES=0
+TEST_URL=""
+_arg_prev=""
+for _arg in "${@:2}"; do
+  case "$_arg_prev" in
+    --test-url) TEST_URL="$_arg"; _arg_prev=""; continue ;;
+  esac
+  case "$_arg" in
+    --list-profiles) LIST_PROFILES=1 ;;
+    --test-url) _arg_prev="--test-url" ;;
+    *) printf 'Unknown argument: %s\n' "$_arg" >&2; exit 1 ;;
+  esac
+  _arg_prev="$_arg"
+done
+unset _arg _arg_prev
 
 CAMERA_USER="${CAMERA_USER:-admin}"
 CAMERA_PASS="${CAMERA_PASS:-}"
@@ -107,6 +125,53 @@ select_best_profile() {
   printf '%s' "$best_token"
 }
 
+# Print a table of all profiles with their pixel dimensions.
+list_all_profiles() {
+  local xml="$1"
+  local current_token='' current_width='' current_height='' item
+  while IFS= read -r item; do
+    case "$item" in
+      Profiles\ *)
+        if [ -n "$current_token" ]; then
+          printf '  %-32s %s x %s px\n' "$current_token" "${current_width:-?}" "${current_height:-?}"
+        fi
+        current_token=$(printf '%s' "$item" | grep -oE 'token="[^"]*"' | sed 's/token="//;s/"//')
+        current_width=''; current_height=''
+        ;;
+      '<tt:Width>'*)  current_width="${item#*>}"  ;;
+      '<tt:Height>'*) current_height="${item#*>}" ;;
+    esac
+  done < <(printf '%s' "$xml" \
+    | grep -oE '(Profiles [^<>]*|<tt:Width>[0-9]+|<tt:Height>[0-9]+)' || true)
+  if [ -n "$current_token" ]; then
+    printf '  %-32s %s x %s px\n' "$current_token" "${current_width:-?}" "${current_height:-?}"
+  fi
+}
+
+# Fetch a URL as a snapshot and report its size and JPEG validity.
+test_snapshot_url() {
+  local url="$1" tmpjpg file_size first_bytes
+  tmpjpg=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmpjpg'" RETURN
+  echo "Testing: $url"
+  "$CURL" -s --digest -u "${CAMERA_USER}:${CAMERA_PASS}" \
+    "$url" -o "$tmpjpg" -m 15 || true
+  file_size=$(wc -c < "$tmpjpg" | tr -d ' ')
+  first_bytes=$(od -A n -N 2 -t x1 "$tmpjpg" 2>/dev/null | tr -d ' \n')
+  if [ "$first_bytes" = "ffd8" ] && [ "$file_size" -gt 1024 ]; then
+    echo "PASS: valid JPEG, ${file_size} bytes"
+  else
+    echo "FAIL: magic=${first_bytes} size=${file_size}B — not a valid JPEG"
+  fi
+}
+
+# --- --test-url: skip ONVIF, just probe a specific URL ---
+if [ -n "$TEST_URL" ]; then
+  test_snapshot_url "$TEST_URL"
+  exit 0
+fi
+
 # --- Step 1: GetCapabilities (no auth) → media XAddr ---
 echo "=== GetCapabilities ==="
 caps=$(soap_post "$DEVICE" \
@@ -131,6 +196,13 @@ echo "=== GetProfiles ==="
 profiles=$(soap_post "$media_xaddr" \
   "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Header>$(make_security_header "$created")</s:Header><s:Body><GetProfiles xmlns=\"http://www.onvif.org/ver10/media/wsdl\"/></s:Body></s:Envelope>")
 token=$(select_best_profile "$profiles")
+
+echo "Available profiles:"
+list_all_profiles "$profiles"
+
+if [ "$LIST_PROFILES" -eq 1 ]; then
+  exit 0
+fi
 
 if [ -z "$token" ]; then
   echo "FAIL: no profile token (auth problem?)" >&2

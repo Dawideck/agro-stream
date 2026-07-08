@@ -524,6 +524,55 @@ CURLEOF2
     bash '$script' 192.168.1.113 >/dev/null 2>&1 || rc=\$?
     [ \"\$rc\" -eq 5 ]
   "
+
+  # Restore original fake_curl (scenario 5 replaced it with the invalid-JPEG variant)
+  cat > "$fake_curl" << CURLEOF3
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$calls_file"
+body="" output_file="" prev=""
+for arg in "\$@"; do
+  case "\$prev" in
+    -d) body="\$arg" ;;
+    -o) output_file="\$arg" ;;
+  esac
+  prev="\$arg"
+done
+if [ -n "\$output_file" ]; then
+  printf '\xff\xd8\xff\xe0' > "\$output_file"
+  dd if=/dev/zero bs=1024 count=11 >> "\$output_file" 2>/dev/null
+  exit 0
+fi
+if printf '%s' "\$body" | grep -q 'GetSystemDateAndTime'; then cat "$tmp_dir/time.xml"
+elif printf '%s' "\$body" | grep -q 'GetCapabilities'; then cat "$tmp_dir/caps.xml"
+elif printf '%s' "\$body" | grep -q 'GetSnapshotUri'; then cat "$tmp_dir/snapuri.xml"
+elif printf '%s' "\$body" | grep -q 'GetProfiles'; then cat "$tmp_dir/profiles.xml"
+else exit 1; fi
+CURLEOF3
+  chmod +x "$fake_curl"
+
+  # --- --list-profiles: prints dimensions, no camera.conf written ---
+  rm -f "$tmp_dir/boot/camera.conf"
+  local list_out="$tmp_dir/list_out.txt"
+  PICAM_CURL="$fake_curl" PICAM_BOOT_DIR="$tmp_dir/boot" \
+  PICAM_DEFAULTS=/dev/null CAMERA_USER=admin CAMERA_PASS= \
+  STATUS_LOG="$tmp_dir/status.log" \
+  bash "$script" 192.168.1.113 --list-profiles > "$list_out" 2>&1 || true
+  check "probe: --list-profiles → shows resolution" \
+    grep -qE '[0-9]+ x [0-9]+ px' "$list_out"
+  check "probe: --list-profiles → no camera.conf written" \
+    test ! -f "$tmp_dir/boot/camera.conf"
+
+  # --- --test-url: reports JPEG size for valid URL ---
+  local testurl_out="$tmp_dir/testurl_out.txt"
+  PICAM_CURL="$fake_curl" PICAM_BOOT_DIR="$tmp_dir/boot" \
+  PICAM_DEFAULTS=/dev/null CAMERA_USER=admin CAMERA_PASS= \
+  STATUS_LOG="$tmp_dir/status.log" \
+  bash "$script" 192.168.1.113 --test-url "http://192.168.1.113/snap.jpg" \
+    > "$testurl_out" 2>&1 || true
+  check "probe: --test-url valid JPEG → PASS reported" \
+    grep -q 'PASS' "$testurl_out"
+  check "probe: --test-url valid JPEG → size shown" \
+    grep -qE '[0-9]+ bytes' "$testurl_out"
 }
 
 # ---------------------------------------------------------------------------
