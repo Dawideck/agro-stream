@@ -1,0 +1,9 @@
+# Cloudflare R2 upload configuration.
+# Set R2_ENABLED=true and fill in credentials to activate uploads.
+# This file is mode 600 — keep the secret key private.
+R2_ENABLED=false
+SITE_ID=agrosfera
+R2_ACCOUNT_ID=
+R2_BUCKET=agrosfera
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=

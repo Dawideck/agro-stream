@@ -30,7 +30,8 @@ apt-get install -y --no-install-recommends curl arp-scan
 
 # ---- directories ------------------------------------------------------------
 echo "[install] Creating directories..."
-mkdir -p "$ETC_DIR" "$VAR_DIR" "$BOOT_PICAM" "$SYSD_CONF_DIR"
+mkdir -p "$ETC_DIR" "$VAR_DIR" "$BOOT_PICAM" "$SYSD_CONF_DIR" \
+         "$VAR_DIR/r2-uploaded"
 
 # ---- scripts ----------------------------------------------------------------
 echo "[install] Installing scripts..."
@@ -52,6 +53,9 @@ if [ ! -f "$BOOT_PICAM/camera.conf" ]; then
 fi
 if [ ! -f "$BOOT_PICAM/alert.conf" ]; then
   install -m 600 "$REPO_DIR/pi/etc/alert.conf.template" "$BOOT_PICAM/alert.conf"
+fi
+if [ ! -f "$BOOT_PICAM/r2.conf" ]; then
+  install -m 600 "$REPO_DIR/pi/etc/r2.conf.template" "$BOOT_PICAM/r2.conf"
 fi
 
 # ---- systemd units ----------------------------------------------------------

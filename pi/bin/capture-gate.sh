@@ -13,30 +13,13 @@ CAPTURE_CONF="${PICAM_CAPTURE_CONF:-/boot/firmware/picam/capture.conf}"
 # shellcheck source=/dev/null
 source <(sed 's/\r//g' "$CAPTURE_CONF" 2>/dev/null || true)
 
+LIBSH="${PICAM_LIB:-/usr/local/bin/picam-lib.sh}"
+# shellcheck source=/dev/null
+source "$LIBSH"
+
 CAPTURE="${PICAM_CAPTURE:-/usr/local/bin/capture.sh}"
 now_hm="${PICAM_NOW_HHMM:-$(date -u +%H:%M)}"
 now_epoch="${PICAM_NOW_EPOCH:-$(date -u +%s)}"
-
-# Convert HH:MM to total minutes; 10# forces decimal interpretation (avoids
-# octal for 08, 09).
-_to_min() {
-  local h="${1%%:*}" m="${1##*:}"
-  printf '%d' $(( 10#$h * 60 + 10#$m ))
-}
-
-_in_window() {
-  local s e n
-  s=$(_to_min "${WINDOW_START:-07:00}")
-  e=$(_to_min "${WINDOW_END:-18:00}")
-  n=$(_to_min "$now_hm")
-  if [ "$s" -le "$e" ]; then
-    # Normal window e.g. 07:00–18:00
-    [ "$n" -ge "$s" ] && [ "$n" -le "$e" ]
-  else
-    # Wrap-around window e.g. 21:00–20:00 (crosses midnight)
-    [ "$n" -ge "$s" ] || [ "$n" -le "$e" ]
-  fi
-}
 
 _last_shot_epoch() {
   local f="${LAST_SHOT_STAMP:-/run/picam/last_shot}"
@@ -64,7 +47,7 @@ case "${MODE:-interval}" in
     done
     ;;
   interval)
-    if _in_window; then
+    if _in_window "$now_hm"; then
       last=$(_last_shot_epoch)
       elapsed=$(( now_epoch - last ))
       interval_sec=$(( ${INTERVAL_MIN:-30} * 60 ))

@@ -49,7 +49,8 @@ test_defaults_completeness() {
               TIMES CAMERA_MAC CAMERA_USER CAMERA_PASS SNAPSHOT_URL ONVIF_MEDIA_XADDR \
               STATUS_LOG STATUS_LOG_MAX_LINES CAMERA_IP_CACHE FAIL_COUNT_FILE \
               LAST_SHOT_STAMP HEALTH_REBOOT_COOLDOWN_SEC \
-              HEALTH_FAIL_REBOOT_THRESHOLD HEALTH_FAIL_NETWORK_RESTART_THRESHOLD; do
+              HEALTH_FAIL_REBOOT_THRESHOLD HEALTH_FAIL_NETWORK_RESTART_THRESHOLD \
+              R2_UPLOAD_DIR; do
     check "defaults has key: $key" grep -q "^${key}=" "$f"
   done
 }
@@ -656,6 +657,7 @@ test_capture_gate() {
     PICAM_DEFAULTS=/dev/null \
     PICAM_CAPTURE_CONF=/dev/null \
     PICAM_CAPTURE="$fake_capture" \
+    PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh" \
     LAST_SHOT_STAMP="$stamp" \
     MODE="${MODE:-interval}" \
     INTERVAL_MIN="${INTERVAL_MIN:-30}" \
@@ -906,6 +908,8 @@ test_healthcheck() {
   tmp_dir=$(mktemp -d)
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp_dir'" RETURN
+  # Export so all inline bash -c subshells inherit it without being modified.
+  export PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh"
 
   mkdir -p "$tmp_dir/boot" "$tmp_dir/photos" "$tmp_dir/var" "$tmp_dir/run"
 
@@ -969,6 +973,7 @@ CURLEOF
     PICAM_CURL="$fake_curl" \
     PICAM_SYSTEMCTL="$fake_systemctl" \
     PICAM_ALERT="$fake_alert" \
+    PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh" \
     JPEG_DIR="$tmp_dir/photos" \
     SNAPSHOT_URL='http://{IP}:80/onvif/Snapshot' \
     CAMERA_USER=admin CAMERA_PASS='' \
@@ -1124,6 +1129,7 @@ CURLEOF
   PICAM_IP_CMD="$fake_ip" PICAM_PING="$fake_ping" \
   PICAM_DISCOVER="$fake_discover" PICAM_CURL="$fake_curl" \
   PICAM_SYSTEMCTL="$fake_systemctl" PICAM_ALERT="$fake_alert" \
+  PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh" \
   JPEG_DIR="$tmp_dir/photos" SNAPSHOT_URL='http://{IP}/snap' \
   CAMERA_USER=admin CAMERA_PASS='' \
   MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
@@ -1467,6 +1473,184 @@ test_export_photos() {
 }
 
 # ---------------------------------------------------------------------------
+test_picam_lib() {
+  echo "--- picam-lib.sh ---"
+  local lib="$REPO_ROOT/pi/bin/picam-lib.sh"
+
+  _run_lib() {
+    WINDOW_START="${WINDOW_START:-07:00}" \
+    WINDOW_END="${WINDOW_END:-18:00}" \
+    bash -c "source '$lib'; $1"
+  }
+
+  # _to_min
+  check "lib: _to_min 00:00 → 0" \
+    bash -c "source '$lib'; [ \"\$(_to_min 00:00)\" = 0 ]"
+  check "lib: _to_min 07:00 → 420" \
+    bash -c "source '$lib'; [ \"\$(_to_min 07:00)\" = 420 ]"
+  check "lib: _to_min 18:00 → 1080" \
+    bash -c "source '$lib'; [ \"\$(_to_min 18:00)\" = 1080 ]"
+  check "lib: _to_min 08:00 decimal (not octal)" \
+    bash -c "source '$lib'; [ \"\$(_to_min 08:00)\" = 480 ]"
+  check "lib: _to_min 09:30 → 570" \
+    bash -c "source '$lib'; [ \"\$(_to_min 09:30)\" = 570 ]"
+
+  # _in_window — normal window
+  check "lib: _in_window 08:00 inside 07:00–18:00" \
+    _run_lib "_in_window 08:00"
+  check "lib: _in_window 07:00 at start" \
+    _run_lib "_in_window 07:00"
+  check "lib: _in_window 18:00 at end" \
+    _run_lib "_in_window 18:00"
+  check "lib: _in_window 06:59 before start → not in" \
+    bash -c "WINDOW_START=07:00 WINDOW_END=18:00 \
+      bash -c \"source '$lib'; ! _in_window 06:59\""
+  check "lib: _in_window 18:01 after end → not in" \
+    bash -c "WINDOW_START=07:00 WINDOW_END=18:00 \
+      bash -c \"source '$lib'; ! _in_window 18:01\""
+
+  # _in_window — wrap-around window (21:00–20:00)
+  check "lib: wrap-around 22:00 inside 21:00–20:00" \
+    bash -c "WINDOW_START=21:00 WINDOW_END=20:00 \
+      bash -c \"source '$lib'; _in_window 22:00\""
+  check "lib: wrap-around 00:00 inside 21:00–20:00" \
+    bash -c "WINDOW_START=21:00 WINDOW_END=20:00 \
+      bash -c \"source '$lib'; _in_window 00:00\""
+  check "lib: wrap-around 20:00 at end inside 21:00–20:00" \
+    bash -c "WINDOW_START=21:00 WINDOW_END=20:00 \
+      bash -c \"source '$lib'; _in_window 20:00\""
+  check "lib: wrap-around 20:30 outside 21:00–20:00" \
+    bash -c "WINDOW_START=21:00 WINDOW_END=20:00 \
+      bash -c \"source '$lib'; ! _in_window 20:30\""
+}
+
+# ---------------------------------------------------------------------------
+test_upload() {
+  echo "--- upload.sh ---"
+  local script="$REPO_ROOT/pi/bin/upload.sh"
+  local lib="$REPO_ROOT/pi/bin/picam-lib.sh"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp_dir'" RETURN
+
+  local jpeg_dir="$tmp_dir/photos"
+  local upload_dir="$tmp_dir/r2-uploaded"
+  local calls_file="$tmp_dir/calls.log"
+  mkdir -p "$jpeg_dir" "$upload_dir"
+
+  # Fake curl: records call args, returns HTTP 200
+  local fake_curl="$tmp_dir/curl"
+  cat > "$fake_curl" << 'CURLEOF'
+#!/usr/bin/env bash
+printf '%s\n---\n' "$*" >> "%CALLS%"
+# Emit HTTP 200 for -w '%{http_code}' style calls
+for arg in "$@"; do
+  [ "$arg" = '%{http_code}' ] && printf '200' && exit 0
+done
+CURLEOF
+  sed -i '' "s|%CALLS%|$calls_file|g" "$fake_curl" 2>/dev/null \
+    || sed -i "s|%CALLS%|$calls_file|g" "$fake_curl"
+  chmod +x "$fake_curl"
+
+  # Create a fake JPEG for today
+  today=$(date -u +%Y-%m-%d)
+  mkdir -p "$jpeg_dir/$today"
+  local first_jpg="$jpeg_dir/$today/080000.jpg"
+  local last_jpg="$jpeg_dir/$today/180000.jpg"
+  printf '\xff\xd8\xff\xe0' > "$first_jpg"
+  dd if=/dev/zero bs=1024 count=11 >> "$first_jpg" 2>/dev/null
+  cp "$first_jpg" "$last_jpg"
+
+  run_upload() {
+    PICAM_DEFAULTS=/dev/null \
+    PICAM_CAPTURE_CONF=/dev/null \
+    PICAM_R2_CONF=/dev/null \
+    PICAM_LIB="$lib" \
+    PICAM_CURL="$fake_curl" \
+    PICAM_JPEG_DIR="$jpeg_dir" \
+    PICAM_R2_UPLOAD_DIR="$upload_dir" \
+    R2_ENABLED="${R2_ENABLED:-true}" \
+    R2_ACCOUNT_ID="${R2_ACCOUNT_ID:-testaccount}" \
+    R2_BUCKET="${R2_BUCKET:-testbucket}" \
+    R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-TESTKEY}" \
+    R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-testsecret}" \
+    SITE_ID="${SITE_ID:-agrosfera}" \
+    WINDOW_START="${WINDOW_START:-07:00}" \
+    WINDOW_END="${WINDOW_END:-18:00}" \
+    INTERVAL_MIN="${INTERVAL_MIN:-30}" \
+    PICAM_NOW_HHMM="${PICAM_NOW_HHMM:-08:00}" \
+    PICAM_NOW_DT="${PICAM_NOW_DT:-20260708T080000Z}" \
+    bash "$script"
+  }
+
+  # --- disabled: R2_ENABLED=false → curl not called ---
+  true > "$calls_file"
+  R2_ENABLED=false run_upload
+  check "upload: R2_ENABLED=false → curl not called" \
+    bash -c "! grep -q '.' '$calls_file'"
+
+  # --- missing credentials → curl not called ---
+  true > "$calls_file"
+  PICAM_DEFAULTS=/dev/null PICAM_CAPTURE_CONF=/dev/null PICAM_R2_CONF=/dev/null \
+  PICAM_LIB="$lib" PICAM_CURL="$fake_curl" \
+  PICAM_JPEG_DIR="$jpeg_dir" PICAM_R2_UPLOAD_DIR="$upload_dir" \
+  R2_ENABLED=true R2_ACCOUNT_ID='' R2_ACCESS_KEY_ID='' R2_SECRET_ACCESS_KEY='' \
+  WINDOW_START=07:00 WINDOW_END=18:00 INTERVAL_MIN=30 PICAM_NOW_HHMM=08:00 \
+  bash "$script" 2>/dev/null || true
+  check "upload: missing credentials → curl not called" \
+    bash -c "! grep -q '.' '$calls_file'"
+
+  # --- BOD: first photo triggers upload ---
+  true > "$calls_file"
+  rm -f "$upload_dir/$today.first" "$upload_dir/$today.last"
+  check "upload: BOD → exits 0" run_upload
+  check "upload: BOD → curl called" grep -q '.' "$calls_file"
+  check "upload: BOD → sentinel created" test -f "$upload_dir/$today.first"
+  check "upload: BOD → sentinel contains jpeg name" \
+    grep -q '080000.jpg' "$upload_dir/$today.first"
+
+  # --- BOD: correct R2 object key format ---
+  yr="${today:0:4}"; mo="${today:5:2}"; dy="${today:8:2}"
+  check "upload: BOD → key contains SITE_ID/photos/date" \
+    grep -qE "agrosfera/photos/${yr}/${mo}/${dy}/080000.jpg" "$calls_file"
+
+  # --- BOD idempotent: sentinel present → no second upload ---
+  true > "$calls_file"
+  check "upload: BOD idempotent → exits 0" run_upload
+  check "upload: BOD idempotent → curl NOT called for BOD" \
+    bash -c "! grep -qE 'agrosfera/photos.*080000' '$calls_file'"
+
+  # --- EOD: fires when next interval is outside window ---
+  true > "$calls_file"
+  rm -f "$upload_dir/$today.last"
+  # At 17:30 with interval=30, next=18:00=WINDOW_END (inclusive → in window)
+  # At 18:00 with interval=30, next=18:30 → outside 07:00–18:00
+  PICAM_NOW_HHMM=18:00 PICAM_NOW_DT=20260708T180000Z run_upload
+  check "upload: EOD fires at last capture → sentinel created" \
+    test -f "$upload_dir/$today.last"
+  check "upload: EOD → curl called" \
+    grep -qE "agrosfera/photos.*180000" "$calls_file"
+
+  # --- EOD not triggered mid-window ---
+  true > "$calls_file"
+  rm -f "$upload_dir/$today.last"
+  # At 08:00 with interval=30, next=08:30 → inside window → no EOD
+  PICAM_NOW_HHMM=08:00 PICAM_NOW_DT=20260708T080000Z run_upload
+  check "upload: EOD not triggered mid-window" \
+    test ! -f "$upload_dir/$today.last"
+
+  # --- Authorization header present in curl call ---
+  true > "$calls_file"
+  rm -f "$upload_dir/$today.first" "$upload_dir/$today.last"
+  run_upload
+  check "upload: Authorization header present" \
+    grep -q 'AWS4-HMAC-SHA256' "$calls_file"
+  check "upload: Authorization contains access key" \
+    grep -q 'TESTKEY' "$calls_file"
+}
+
+# ---------------------------------------------------------------------------
 test_camera_time_parsing
 
 # ---------------------------------------------------------------------------
@@ -1483,6 +1667,8 @@ test_healthcheck
 test_picam_config
 test_export_photos
 test_alert
+test_picam_lib
+test_upload
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

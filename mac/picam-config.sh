@@ -263,6 +263,73 @@ _show_status() {
   fi
 }
 
+# ---- R2 upload config -------------------------------------------------------
+
+_r2_setup() {
+  _hline
+  _println "  R2 — konfiguracja wysyłania zdjęć do chmury"
+  _hline
+
+  local r2_conf="$PICAM_DIR/r2.conf"
+  local enabled site_id account_id bucket access_key
+  enabled=$(_read_conf_val "$r2_conf" R2_ENABLED 2>/dev/null || echo "false")
+  site_id=$(_read_conf_val "$r2_conf" SITE_ID 2>/dev/null || echo "agrosfera")
+  account_id=$(_read_conf_val "$r2_conf" R2_ACCOUNT_ID 2>/dev/null || echo "")
+  bucket=$(_read_conf_val "$r2_conf" R2_BUCKET 2>/dev/null || echo "agrosfera")
+  access_key=$(_read_conf_val "$r2_conf" R2_ACCESS_KEY_ID 2>/dev/null || echo "")
+
+  _println ""
+  _println "  Obecna konfiguracja:"
+  _println "    Włączone : $enabled"
+  _println "    SITE_ID  : $site_id"
+  _println "    Konto    : ${account_id:-<nie ustawiono>}"
+  _println "    Bucket   : $bucket"
+  _println "    Klucz ID : ${access_key:-<nie ustawiono>}"
+  _println ""
+  _println "  [1] Włącz / zaktualizuj dane R2"
+  _println "  [2] Wyłącz R2"
+  _println "  [Enter] Bez zmian"
+
+  local choice
+  _ask "  Wybierz [1/2/Enter]: " choice
+
+  case "$choice" in
+    1)
+      local new_site new_account new_bucket new_key new_secret cur_secret
+      _ask "  SITE_ID [$site_id]: " new_site
+      [ -z "$new_site" ] && new_site="$site_id"
+      _ask "  R2 Account ID [$account_id]: " new_account
+      [ -z "$new_account" ] && new_account="$account_id"
+      _ask "  R2 Bucket [$bucket]: " new_bucket
+      [ -z "$new_bucket" ] && new_bucket="$bucket"
+      _ask "  R2 Access Key ID [$access_key]: " new_key
+      [ -z "$new_key" ] && new_key="$access_key"
+      _secret "  R2 Secret Access Key (Enter = bez zmian): " new_secret
+      if [ -z "$new_secret" ]; then
+        new_secret=$(_read_conf_val "$r2_conf" R2_SECRET_ACCESS_KEY 2>/dev/null || echo "")
+      fi
+      printf 'R2_ENABLED=true\nSITE_ID=%s\nR2_ACCOUNT_ID=%s\nR2_BUCKET=%s\nR2_ACCESS_KEY_ID=%s\nR2_SECRET_ACCESS_KEY=%s\n' \
+        "$new_site" "$new_account" "$new_bucket" "$new_key" "$new_secret" \
+        > "$r2_conf"
+      _println ""
+      _println "  Zapisano. R2 włączone."
+      ;;
+    2)
+      cur_secret=$(_read_conf_val "$r2_conf" R2_SECRET_ACCESS_KEY 2>/dev/null || echo "")
+      printf 'R2_ENABLED=false\nSITE_ID=%s\nR2_ACCOUNT_ID=%s\nR2_BUCKET=%s\nR2_ACCESS_KEY_ID=%s\nR2_SECRET_ACCESS_KEY=%s\n' \
+        "$site_id" "$account_id" "$bucket" "$access_key" "$cur_secret" \
+        > "$r2_conf"
+      _println "  R2 wyłączone. Dane zachowane."
+      ;;
+    "")
+      _println "  Bez zmian."
+      ;;
+    *)
+      _println "  Nieznana opcja."
+      ;;
+  esac
+}
+
 # ---- Last photo -------------------------------------------------------------
 
 _show_photo() {
@@ -302,7 +369,8 @@ main() {
     _println "  [2] Zmień harmonogram zdjęć"
     _println "  [3] Pokaż ostatni status"
     _println "  [4] Pokaż ostatnie zdjęcie"
-    _println "  [5] Wyjdź"
+    _println "  [5] Konfiguruj wysyłanie R2"
+    _println "  [6] Wyjdź"
     _hline
     _ask "  Wybierz opcję: " choice
     _println ""
@@ -311,7 +379,8 @@ main() {
       2) _schedule_edit ;;
       3) _show_status ;;
       4) _show_photo ;;
-      5|q|Q|"") _println "  Do widzenia."; exit 0 ;;
+      5) _r2_setup ;;
+      6|q|Q|"") _println "  Do widzenia."; exit 0 ;;
       *) _println "  Nieznana opcja '$choice'." ;;
     esac
   done

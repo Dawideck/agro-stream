@@ -94,6 +94,8 @@ _cleanup() {
   done
 }
 
+UPLOAD="${PICAM_UPLOAD:-/usr/local/bin/upload.sh}"
+
 # --- main ---
 ip=$(_get_ip) || _fail "camera not found"
 
@@ -104,3 +106,7 @@ if ! _shoot "$ip"; then
 fi
 
 _cleanup
+
+if [ -x "$UPLOAD" ]; then
+  "$UPLOAD" || _log "upload failed (non-fatal)"
+fi

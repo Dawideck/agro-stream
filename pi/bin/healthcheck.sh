@@ -2,10 +2,10 @@
 # Boot + hourly health check.
 # Boot mode (first run after power-on): network + live camera snapshot.
 # Hourly mode: network + last-photo age within schedule slack.
-# Both modes: disk space > 500 MB.
+# Both modes: disk space > 500 MB; R2 reachable (if enabled).
 # Injections for testing: PICAM_DEFAULTS, PICAM_BOOT_DIR, PICAM_HC_MODE,
 #   PICAM_BOOT_MARKER, PICAM_IP_CMD, PICAM_PING, PICAM_DISCOVER, PICAM_CURL,
-#   PICAM_SYSTEMCTL, PICAM_ALERT, PICAM_DISK_AVAIL_KB.
+#   PICAM_SYSTEMCTL, PICAM_ALERT, PICAM_DISK_AVAIL_KB, PICAM_LIB.
 set -euo pipefail
 
 DEFAULTS="${PICAM_DEFAULTS:-/etc/picam/defaults.conf}"
@@ -13,11 +13,16 @@ DEFAULTS="${PICAM_DEFAULTS:-/etc/picam/defaults.conf}"
 source <(sed 's/\r//g' "$DEFAULTS" 2>/dev/null || true)
 
 BOOT_PICAM="${PICAM_BOOT_DIR:-/boot/firmware/picam}"
-for _conf in "$BOOT_PICAM/capture.conf" "$BOOT_PICAM/camera.conf"; do
+for _conf in "$BOOT_PICAM/capture.conf" "$BOOT_PICAM/camera.conf" \
+             "$BOOT_PICAM/r2.conf"; do
   # shellcheck source=/dev/null
   source <(sed 's/\r//g' "$_conf" 2>/dev/null || true)
 done
 unset _conf
+
+LIBSH="${PICAM_LIB:-/usr/local/bin/picam-lib.sh}"
+# shellcheck source=/dev/null
+source "$LIBSH"
 
 CURL="${PICAM_CURL:-curl}"
 DISCOVER="${PICAM_DISCOVER:-discover-camera.sh}"
@@ -48,9 +53,6 @@ _log() {
 _read_n() { grep -oE '^[0-9]+' "$1" 2>/dev/null || echo 0; }
 _inc_n()   { printf '%d\n' "$(( $(_read_n "$1") + 1 ))" > "$1"; }
 _reset_n() { printf '0\n' > "$1"; }
-
-# Convert HH:MM to minutes (decimal-safe for 08, 09).
-_to_min() { local h="${1%%:*}" m="${1##*:}"; printf '%d' $(( 10#$h * 60 + 10#$m )); }
 
 # ---- Check 1: Network ----
 _check_network() {
@@ -193,6 +195,18 @@ else
   _log "WARN: disk low (<500 MB), pruning oldest day"
   _prune_oldest_day
   [ "$overall" = "OK" ] && overall=WARN
+fi
+
+# ---- R2 reachability (if enabled) ----
+if [ "${R2_ENABLED:-false}" = "true" ] && [ -n "${R2_ACCOUNT_ID:-}" ]; then
+  r2_url="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET:-agrosfera}/"
+  r2_code=$("$CURL" -s -o /dev/null -w '%{http_code}' \
+    --connect-timeout 10 "$r2_url" 2>/dev/null || echo 0)
+  case "$r2_code" in
+    2*|403|404) _log "OK: R2 reachable (HTTP $r2_code)" ;;
+    *) _log "WARN: R2 unreachable (HTTP $r2_code)"
+       [ "$overall" = "OK" ] && overall=WARN ;;
+  esac
 fi
 
 _log "summary: $overall"
