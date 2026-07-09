@@ -1137,29 +1137,36 @@ CURLEOF
     test -f "$alert_calls"
   check "hc: camera fail → alert sentinel written" \
     test -f "$last_cam_alert"
+  check "hc: camera fail → .last sentinel written" \
+    test -f "${last_cam_alert}.last"
 
   # --- second fail within cooldown → no second alert ---
   true > "$alert_calls"
-  printf '%d\n' "$(date -u +%s)" > "$last_cam_alert"
+  printf '%d\n' "$(date -u +%s)" > "${last_cam_alert}.last"
   PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="$fail_discover" run_hc || true
   check "hc: camera fail within cooldown → no second alert" \
     bash -c "! grep -q '.' '$alert_calls' 2>/dev/null"
 
   # --- fail after cooldown expired → alert re-sent ---
   true > "$alert_calls"
-  printf '0\n' > "$last_cam_alert"
+  printf '0\n' > "${last_cam_alert}.last"
   PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="$fail_discover" run_hc || true
   check "hc: camera fail after cooldown → alert re-sent" \
-    test -f "$alert_calls"
+    grep -q '.' "$alert_calls"
 
-  # --- camera recovery → recovery alert sent, sentinel removed ---
+  # --- camera recovery → recovery alert sent, both sentinels removed ---
   true > "$alert_calls"
-  printf '%d\n' "$(date -u +%s)" > "$last_cam_alert"
+  printf '%d\n' "$(( $(date -u +%s) - 3600 ))" > "$last_cam_alert"
+  printf '%d\n' "$(date -u +%s)" > "${last_cam_alert}.last"
   PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="" run_hc || true
   check "hc: camera recovery → recovery alert sent" \
     grep -q 'recovered' "$alert_calls"
+  check "hc: camera recovery → recovery msg contains duration" \
+    grep -q 'min' "$alert_calls"
   check "hc: camera recovery → sentinel removed" \
     test ! -f "$last_cam_alert"
+  check "hc: camera recovery → .last sentinel removed" \
+    test ! -f "${last_cam_alert}.last"
 
   # --- disk low → prune oldest day ---
   mkdir -p "$tmp_dir/photos/2020-06-01"

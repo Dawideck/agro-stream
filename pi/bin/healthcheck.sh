@@ -197,24 +197,27 @@ if [ "$cam_ok" -eq 0 ]; then
   cam_n=$(_read_n "$FAIL_COUNT_FILE")
   if [ "$cam_n" -ge "${HEALTH_CAMERA_ALERT_THRESHOLD:-2}" ]; then
     last_alerted=0
-    [ -f "$_cam_alert_file" ] \
-      && last_alerted=$(grep -oE '^[0-9]+' "$_cam_alert_file" 2>/dev/null || echo 0)
+    [ -f "${_cam_alert_file}.last" ] \
+      && last_alerted=$(grep -oE '^[0-9]+' "${_cam_alert_file}.last" 2>/dev/null || echo 0)
     alert_elapsed=$(( $(date -u +%s) - last_alerted ))
     if [ "$alert_elapsed" -ge "${CAMERA_ALERT_COOLDOWN_SEC:-3600}" ]; then
       _log "WARN: camera fail (${cam_n}x) → sending alert"
       $ALERT "PiCam: camera unavailable (${cam_n}x consecutive)" 2>/dev/null || true
-      printf '%d\n' "$(date -u +%s)" > "$_cam_alert_file"
+      # Write sentinel only on first alert (preserves "went down at" timestamp for recovery msg).
+      [ -f "$_cam_alert_file" ] || printf '%d\n' "$(date -u +%s)" > "$_cam_alert_file"
+      # Track last-alerted separately so cooldown works correctly.
+      printf '%d\n' "$(date -u +%s)" > "${_cam_alert_file}.last"
     else
       _log "WARN: camera fail (${cam_n}x), alert cooldown (${alert_elapsed}s)"
     fi
   fi
 else
-  prev_cam_n=$(_read_n "$FAIL_COUNT_FILE")
   if [ -f "$_cam_alert_file" ]; then
-    _log "OK: camera recovered (after ${prev_cam_n}x failures) → sending recovery alert"
-    $ALERT "PiCam: camera recovered (was unavailable for ${prev_cam_n} consecutive checks)" \
-      2>/dev/null || true
-    rm -f "$_cam_alert_file"
+    first_alerted=$(grep -oE '^[0-9]+' "$_cam_alert_file" 2>/dev/null || echo 0)
+    down_min=$(( ( $(date -u +%s) - first_alerted ) / 60 ))
+    _log "OK: camera recovered (down ~${down_min}min) → sending recovery alert"
+    $ALERT "PiCam: camera recovered (was down ~${down_min} min)" 2>/dev/null || true
+    rm -f "$_cam_alert_file" "${_cam_alert_file}.last"
   fi
   _reset_n "$FAIL_COUNT_FILE"
 fi
