@@ -191,14 +191,31 @@ else
   fi
 fi
 
+_cam_alert_file="${LAST_CAMERA_ALERT_FILE:-/var/lib/picam/last_camera_alert}"
 if [ "$cam_ok" -eq 0 ]; then
   _inc_n "$FAIL_COUNT_FILE"
   cam_n=$(_read_n "$FAIL_COUNT_FILE")
   if [ "$cam_n" -ge "${HEALTH_CAMERA_ALERT_THRESHOLD:-2}" ]; then
-    _log "WARN: camera fail (${cam_n}x) → sending alert"
-    $ALERT "PiCam: camera unavailable (${cam_n}x consecutive)" 2>/dev/null || true
+    last_alerted=0
+    [ -f "$_cam_alert_file" ] \
+      && last_alerted=$(grep -oE '^[0-9]+' "$_cam_alert_file" 2>/dev/null || echo 0)
+    alert_elapsed=$(( $(date -u +%s) - last_alerted ))
+    if [ "$alert_elapsed" -ge "${CAMERA_ALERT_COOLDOWN_SEC:-3600}" ]; then
+      _log "WARN: camera fail (${cam_n}x) → sending alert"
+      $ALERT "PiCam: camera unavailable (${cam_n}x consecutive)" 2>/dev/null || true
+      printf '%d\n' "$(date -u +%s)" > "$_cam_alert_file"
+    else
+      _log "WARN: camera fail (${cam_n}x), alert cooldown (${alert_elapsed}s)"
+    fi
   fi
 else
+  prev_cam_n=$(_read_n "$FAIL_COUNT_FILE")
+  if [ -f "$_cam_alert_file" ]; then
+    _log "OK: camera recovered (after ${prev_cam_n}x failures) → sending recovery alert"
+    $ALERT "PiCam: camera recovered (was unavailable for ${prev_cam_n} consecutive checks)" \
+      2>/dev/null || true
+    rm -f "$_cam_alert_file"
+  fi
   _reset_n "$FAIL_COUNT_FILE"
 fi
 

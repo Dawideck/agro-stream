@@ -50,7 +50,8 @@ test_defaults_completeness() {
               STATUS_LOG STATUS_LOG_MAX_LINES CAMERA_IP_CACHE FAIL_COUNT_FILE \
               LAST_SHOT_STAMP HEALTH_REBOOT_COOLDOWN_SEC \
               HEALTH_FAIL_REBOOT_THRESHOLD HEALTH_FAIL_NETWORK_RESTART_THRESHOLD \
-              HEALTH_CAMERA_ALERT_THRESHOLD \
+              HEALTH_CAMERA_ALERT_THRESHOLD CAMERA_ALERT_COOLDOWN_SEC \
+              LAST_CAMERA_ALERT_FILE \
               R2_UPLOAD_DIR; do
     check "defaults has key: $key" grep -q "^${key}=" "$f"
   done
@@ -909,9 +910,6 @@ test_healthcheck() {
   tmp_dir=$(mktemp -d)
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp_dir'" RETURN
-  # Export so all inline bash -c subshells inherit without being modified one by one.
-  export PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh"
-  export HEALTH_CAMERA_ALERT_THRESHOLD=2
 
   mkdir -p "$tmp_dir/boot" "$tmp_dir/photos" "$tmp_dir/var" "$tmp_dir/run"
 
@@ -922,6 +920,13 @@ test_healthcheck() {
   local boot_marker="$tmp_dir/run/hc_booted"
   local systemctl_calls="$tmp_dir/systemctl_calls"
   local alert_calls="$tmp_dir/alert_calls"
+  local last_cam_alert="$tmp_dir/var/last_cam_alert"
+
+  # Export so all inline bash -c subshells inherit without being modified one by one.
+  export PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh"
+  export HEALTH_CAMERA_ALERT_THRESHOLD=2
+  export LAST_CAMERA_ALERT_FILE="$last_cam_alert"
+  export CAMERA_ALERT_COOLDOWN_SEC=3600
 
   # Fake ip: outputs a default route with a gateway
   local fake_ip="$tmp_dir/ip.sh"
@@ -989,6 +994,8 @@ CURLEOF
     HEALTH_FAIL_REBOOT_THRESHOLD=6 \
     HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
     HEALTH_CAMERA_ALERT_THRESHOLD="${HEALTH_CAMERA_ALERT_THRESHOLD:-2}" \
+    LAST_CAMERA_ALERT_FILE="$last_cam_alert" \
+    CAMERA_ALERT_COOLDOWN_SEC="${CAMERA_ALERT_COOLDOWN_SEC:-3600}" \
     HEALTH_REBOOT_COOLDOWN_SEC=21600 \
     PICAM_DISK_AVAIL_KB=600000 \
     bash "$script"
@@ -1120,29 +1127,39 @@ CURLEOF
   check "hc: reboot cooldown → reboot NOT called" \
     bash -c "! grep -q 'reboot' '$systemctl_calls' 2>/dev/null"
 
-  # --- camera fail N× ≥ threshold → alert called ---
-  rm -f "$netfail" "$systemctl_calls"
+  # --- camera fail ≥ threshold → first alert sent, sentinel written ---
+  rm -f "$netfail" "$systemctl_calls" "$alert_calls" "$last_cam_alert"
   printf '6\n' > "$failcount"
-  true > "$alert_calls"
   local fail_discover="$tmp_dir/fail_discover.sh"
   printf '#!/usr/bin/env bash\nexit 3\n' > "$fail_discover"; chmod +x "$fail_discover"
-  bash -c "
-    PICAM_DEFAULTS=/dev/null PICAM_BOOT_DIR='$tmp_dir/boot' \
-    PICAM_HC_MODE=boot PICAM_BOOT_MARKER='$tmp_dir/run/hc2' \
-    PICAM_IP_CMD='$fake_ip' PICAM_PING='$fake_ping' \
-    PICAM_DISCOVER='$fail_discover' PICAM_CURL='$fake_curl' \
-    PICAM_SYSTEMCTL='$fake_systemctl' PICAM_ALERT='$fake_alert' \
-    JPEG_DIR='$tmp_dir/photos' SNAPSHOT_URL='http://{IP}/snap' \
-    CAMERA_USER=admin CAMERA_PASS='' \
-    MODE=interval INTERVAL_MIN=30 WINDOW_START=07:00 WINDOW_END=18:00 \
-    LAST_SHOT_STAMP='$stamp' FAIL_COUNT_FILE='$failcount' \
-    NETWORK_FAIL_COUNT_FILE='$netfail' LAST_REBOOT_FILE='$last_reboot' \
-    HEALTH_FAIL_REBOOT_THRESHOLD=6 HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
-    HEALTH_REBOOT_COOLDOWN_SEC=21600 PICAM_DISK_AVAIL_KB=600000 \
-    bash '$script' >/dev/null 2>&1 || true
-  "
+  PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="$fail_discover" run_hc || true
   check "hc: camera fail (≥ threshold) → alert called" \
     test -f "$alert_calls"
+  check "hc: camera fail → alert sentinel written" \
+    test -f "$last_cam_alert"
+
+  # --- second fail within cooldown → no second alert ---
+  true > "$alert_calls"
+  printf '%d\n' "$(date -u +%s)" > "$last_cam_alert"
+  PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="$fail_discover" run_hc || true
+  check "hc: camera fail within cooldown → no second alert" \
+    bash -c "! grep -q '.' '$alert_calls' 2>/dev/null"
+
+  # --- fail after cooldown expired → alert re-sent ---
+  true > "$alert_calls"
+  printf '0\n' > "$last_cam_alert"
+  PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="$fail_discover" run_hc || true
+  check "hc: camera fail after cooldown → alert re-sent" \
+    test -f "$alert_calls"
+
+  # --- camera recovery → recovery alert sent, sentinel removed ---
+  true > "$alert_calls"
+  printf '%d\n' "$(date -u +%s)" > "$last_cam_alert"
+  PICAM_HC_MODE=boot PICAM_DISCOVER_OVERRIDE="" run_hc || true
+  check "hc: camera recovery → recovery alert sent" \
+    grep -q 'recovered' "$alert_calls"
+  check "hc: camera recovery → sentinel removed" \
+    test ! -f "$last_cam_alert"
 
   # --- disk low → prune oldest day ---
   mkdir -p "$tmp_dir/photos/2020-06-01"
