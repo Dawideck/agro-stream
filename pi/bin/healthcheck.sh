@@ -88,7 +88,11 @@ _check_camera_hourly() {
   local ws we wdur overnight
   ws=$(_to_min "${WINDOW_START:-07:00}")
   we=$(_to_min "${WINDOW_END:-18:00}")
-  wdur=$(( (we - ws) * 60 ))
+  if [ "$ws" -le "$we" ]; then
+    wdur=$(( (we - ws) * 60 ))
+  else
+    wdur=$(( (1440 - ws + we) * 60 ))
+  fi
   overnight=$(( 86400 - wdur ))
   max_age=$(( overnight + ${INTERVAL_MIN:-30} * 120 + 3600 ))
 
