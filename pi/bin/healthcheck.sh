@@ -207,7 +207,7 @@ if [ "${R2_ENABLED:-false}" = "true" ] && [ -n "${R2_ACCOUNT_ID:-}" ]; then
   r2_code=$("$CURL" -s -o /dev/null -w '%{http_code}' \
     --connect-timeout 10 "$r2_url" 2>/dev/null || echo 0)
   case "$r2_code" in
-    2*|403|404) _log "OK: R2 reachable (HTTP $r2_code)" ;;
+    2*|400|403|404) _log "OK: R2 reachable (HTTP $r2_code)" ;;
     *) _log "WARN: R2 unreachable (HTTP $r2_code)"
        [ "$overall" = "OK" ] && overall=WARN ;;
   esac
