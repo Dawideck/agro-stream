@@ -50,6 +50,7 @@ test_defaults_completeness() {
               STATUS_LOG STATUS_LOG_MAX_LINES CAMERA_IP_CACHE FAIL_COUNT_FILE \
               LAST_SHOT_STAMP HEALTH_REBOOT_COOLDOWN_SEC \
               HEALTH_FAIL_REBOOT_THRESHOLD HEALTH_FAIL_NETWORK_RESTART_THRESHOLD \
+              HEALTH_CAMERA_ALERT_THRESHOLD \
               R2_UPLOAD_DIR; do
     check "defaults has key: $key" grep -q "^${key}=" "$f"
   done
@@ -908,8 +909,9 @@ test_healthcheck() {
   tmp_dir=$(mktemp -d)
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp_dir'" RETURN
-  # Export so all inline bash -c subshells inherit it without being modified.
+  # Export so all inline bash -c subshells inherit without being modified one by one.
   export PICAM_LIB="$REPO_ROOT/pi/bin/picam-lib.sh"
+  export HEALTH_CAMERA_ALERT_THRESHOLD=2
 
   mkdir -p "$tmp_dir/boot" "$tmp_dir/photos" "$tmp_dir/var" "$tmp_dir/run"
 
@@ -977,14 +979,16 @@ CURLEOF
     JPEG_DIR="$tmp_dir/photos" \
     SNAPSHOT_URL='http://{IP}:80/onvif/Snapshot' \
     CAMERA_USER=admin CAMERA_PASS='' \
-    MODE=interval INTERVAL_MIN=30 \
-    WINDOW_START=07:00 WINDOW_END=18:00 \
+    MODE=interval INTERVAL_MIN="${INTERVAL_MIN:-30}" \
+    WINDOW_START="${WINDOW_START:-07:00}" WINDOW_END="${WINDOW_END:-18:00}" \
+    PICAM_NOW_HHMM="${PICAM_NOW_HHMM:-}" \
     LAST_SHOT_STAMP="$stamp" \
     FAIL_COUNT_FILE="$failcount" \
     NETWORK_FAIL_COUNT_FILE="$netfail" \
     LAST_REBOOT_FILE="$last_reboot" \
     HEALTH_FAIL_REBOOT_THRESHOLD=6 \
     HEALTH_FAIL_NETWORK_RESTART_THRESHOLD=3 \
+    HEALTH_CAMERA_ALERT_THRESHOLD="${HEALTH_CAMERA_ALERT_THRESHOLD:-2}" \
     HEALTH_REBOOT_COOLDOWN_SEC=21600 \
     PICAM_DISK_AVAIL_KB=600000 \
     bash "$script"
@@ -1004,6 +1008,28 @@ CURLEOF
   check "hc: hourly, recent photo → exits 0" [ $? -eq 0 ] || true
   check "hc: hourly, recent photo → status OK (no alert)" \
     test ! -f "$alert_calls"
+
+  # --- hourly, in-window, stale → FAIL; alert after 2 consecutive failures ---
+  rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  # Stamp 2h ago; INTERVAL_MIN=10 → max_age in-window = 30 min → stale.
+  printf '%d\n' "$(( $(date -u +%s) - 7200 ))" > "$stamp"
+  PICAM_HC_MODE=hourly PICAM_NOW_HHMM=12:00 INTERVAL_MIN=10 \
+    WINDOW_START=07:00 WINDOW_END=18:00 run_hc || true
+  check "hc: in-window stale photo → fail_count = 1" \
+    bash -c "[ \"\$(cat '$failcount' 2>/dev/null || echo 0)\" -eq 1 ]"
+  check "hc: in-window stale photo (1x) → no alert yet" \
+    test ! -f "$alert_calls"
+  PICAM_HC_MODE=hourly PICAM_NOW_HHMM=12:00 INTERVAL_MIN=10 \
+    WINDOW_START=07:00 WINDOW_END=18:00 run_hc || true
+  check "hc: in-window stale (2x) → alert called" \
+    test -f "$alert_calls"
+
+  # --- hourly, outside window, within overnight gap → OK ---
+  rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"
+  printf '%d\n' "$(( $(date -u +%s) - 3600 ))" > "$stamp"  # 1h ago
+  PICAM_HC_MODE=hourly PICAM_NOW_HHMM=06:00 \
+    WINDOW_START=07:00 WINDOW_END=18:00 run_hc
+  check "hc: outside window, within overnight gap → exits 0" true
 
   # --- network fail → fail_count incremented, no escalation yet ---
   rm -f "$failcount" "$netfail" "$systemctl_calls" "$alert_calls"

@@ -1,9 +1,9 @@
 [Unit]
-Description=PiCam healthcheck — 2 min after boot then every hour
+Description=PiCam healthcheck — 2 min after boot then every 30 min
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1h
+OnUnitActiveSec=30min
 Persistent=true
 
 [Install]

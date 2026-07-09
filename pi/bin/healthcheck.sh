@@ -2,10 +2,12 @@
 # Boot + hourly health check.
 # Boot mode (first run after power-on): network + live camera snapshot.
 # Hourly mode: network + last-photo age within schedule slack.
+#   Inside window: stale if age > 3×INTERVAL_MIN (tight — camera is expected live).
+#   Outside window: stale only if age > overnight_gap + slack (no false alerts).
 # Both modes: disk space > 500 MB; R2 reachable (if enabled).
 # Injections for testing: PICAM_DEFAULTS, PICAM_BOOT_DIR, PICAM_HC_MODE,
 #   PICAM_BOOT_MARKER, PICAM_IP_CMD, PICAM_PING, PICAM_DISCOVER, PICAM_CURL,
-#   PICAM_SYSTEMCTL, PICAM_ALERT, PICAM_DISK_AVAIL_KB, PICAM_LIB.
+#   PICAM_SYSTEMCTL, PICAM_ALERT, PICAM_DISK_AVAIL_KB, PICAM_LIB, PICAM_NOW_HHMM.
 set -euo pipefail
 
 DEFAULTS="${PICAM_DEFAULTS:-/etc/picam/defaults.conf}"
@@ -84,17 +86,25 @@ _check_camera_hourly() {
     && last=$(grep -oE '^[0-9]+' "$LAST_SHOT_STAMP" 2>/dev/null || echo 0)
   age_sec=$(( $(date -u +%s) - last ))
 
-  # Max allowed age: overnight gap (window off-hours) + 2 intervals + 1h slack.
-  local ws we wdur overnight
-  ws=$(_to_min "${WINDOW_START:-07:00}")
-  we=$(_to_min "${WINDOW_END:-18:00}")
-  if [ "$ws" -le "$we" ]; then
-    wdur=$(( (we - ws) * 60 ))
+  local now_hm
+  now_hm="${PICAM_NOW_HHMM:-$(date -u +%H:%M)}"
+
+  if _in_window "$now_hm"; then
+    # Inside window: camera should be shooting — tolerate at most 3 missed intervals.
+    max_age=$(( ${INTERVAL_MIN:-30} * 3 * 60 ))
   else
-    wdur=$(( (1440 - ws + we) * 60 ))
+    # Outside window: tolerate overnight gap + 2 intervals + 1h slack.
+    local ws we wdur overnight
+    ws=$(_to_min "${WINDOW_START:-07:00}")
+    we=$(_to_min "${WINDOW_END:-18:00}")
+    if [ "$ws" -le "$we" ]; then
+      wdur=$(( (we - ws) * 60 ))
+    else
+      wdur=$(( (1440 - ws + we) * 60 ))
+    fi
+    overnight=$(( 86400 - wdur ))
+    max_age=$(( overnight + ${INTERVAL_MIN:-30} * 120 + 3600 ))
   fi
-  overnight=$(( 86400 - wdur ))
-  max_age=$(( overnight + ${INTERVAL_MIN:-30} * 120 + 3600 ))
 
   [ "$age_sec" -le "$max_age" ]
 }
@@ -184,7 +194,7 @@ fi
 if [ "$cam_ok" -eq 0 ]; then
   _inc_n "$FAIL_COUNT_FILE"
   cam_n=$(_read_n "$FAIL_COUNT_FILE")
-  if [ "$cam_n" -ge "${HEALTH_FAIL_REBOOT_THRESHOLD:-6}" ]; then
+  if [ "$cam_n" -ge "${HEALTH_CAMERA_ALERT_THRESHOLD:-2}" ]; then
     _log "WARN: camera fail (${cam_n}x) → sending alert"
     $ALERT "PiCam: camera unavailable (${cam_n}x consecutive)" 2>/dev/null || true
   fi
